@@ -54,7 +54,7 @@
         ],
         "dev": [
             "Composer\\Config::disableProcessTimeout",
-            "@php artisan dev"
+            "PHP_INI_SCAN_DIR=\":$PWD/php-ini\" php artisan dev"
         ],
         "lint": [
             "pint --parallel"

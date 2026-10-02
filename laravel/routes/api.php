@@ -17,6 +17,9 @@ Route::post('/screens/{screen}/heartbeat', [ScreenController::class, 'heartbeat'
 Route::post('/device/refresh', [ScreenController::class, 'refreshDeviceToken'])
     ->middleware('throttle:10,1')
     ->name('device.refresh');
+Route::post('/device/claim', [ScreenController::class, 'claimDevice'])
+    ->middleware('throttle:30,1')
+    ->name('device.claim');
 Route::get('/device/content', [ScreenController::class, 'deviceContent'])
     ->middleware('throttle:120,1')
     ->name('device.content');
@@ -41,6 +44,8 @@ Route::middleware('auth:sanctum')->group(function () {
         ->name('screens.playlists.index');
     Route::post('/screens/{screen}/playlists', [ScreenController::class, 'attachPlaylist'])
         ->name('screens.playlists.store');
+    Route::put('/screens/{screen}/playlists', [ScreenController::class, 'updatePlaylistSchedule'])
+        ->name('screens.playlists.update');
     Route::delete('/screens/{screen}/playlists', [ScreenController::class, 'detachPlaylist'])
         ->name('screens.playlists.destroy');
 

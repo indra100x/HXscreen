@@ -1,9 +1,15 @@
-import { Head, Link, router, useHttp } from '@inertiajs/react';
+import { Head, router, useHttp } from '@inertiajs/react';
+import {
+    ArrowUpRight,
+    Building2,
+    Clapperboard,
+    ListVideo,
+    MonitorPlay,
+} from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
     Card,
@@ -26,6 +32,7 @@ import { Label } from '@/components/ui/label';
 import { dashboard } from '@/routes';
 import { show } from '@/routes/business';
 import { destroy, store } from '@/routes/businesses';
+import { toastApiError } from '@/lib/api-errors';
 import type { Business } from '@/types';
 
 function CreateBusinessDialog() {
@@ -41,7 +48,7 @@ function CreateBusinessDialog() {
                 toast.success('Business created');
                 router.reload();
             },
-            onError: () => toast.error('Could not create business'),
+            onError: toastApiError('Could not create business'),
         });
     }
 
@@ -84,7 +91,8 @@ function CreateBusinessDialog() {
 function BusinessCard({ business }: { business: Business }) {
     const { delete: remove, processing } = useHttp();
 
-    function onDelete() {
+    function onDelete(e: React.MouseEvent) {
+        e.stopPropagation();
         if (!window.confirm(`Delete "${business.name}" and all its content?`)) {
             return;
         }
@@ -93,57 +101,111 @@ function BusinessCard({ business }: { business: Business }) {
                 toast.success('Business deleted');
                 router.reload();
             },
-            onError: () => toast.error('Could not delete business'),
+            onError: toastApiError('Could not delete business'),
         });
     }
 
+    function open() {
+        router.visit(show.url({ business: business.id }));
+    }
+
+    const stats = [
+        {
+            icon: MonitorPlay,
+            value: business.screens_count ?? 0,
+            label: 'screens',
+        },
+        {
+            icon: ListVideo,
+            value: business.playlists_count ?? 0,
+            label: 'playlists',
+        },
+        {
+            icon: Clapperboard,
+            value: business.videos_count ?? 0,
+            label: 'videos',
+        },
+    ];
+
     return (
-        <Card>
+        <Card
+            onClick={open}
+            className="group cursor-pointer transition-all hover:-translate-y-0.5 hover:border-primary/50 hover:shadow-lg"
+        >
             <CardHeader>
                 <div className="flex items-start justify-between gap-2">
-                    <div>
-                        <CardTitle>
-                            <Link
-                                href={show.url({ business: business.id })}
-                                className="hover:underline"
-                            >
+                    <div className="flex items-center gap-3">
+                        <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
+                            <Building2 className="size-5" />
+                        </span>
+                        <div>
+                            <CardTitle className="leading-tight">
                                 {business.name}
-                            </Link>
-                        </CardTitle>
-                        <CardDescription>
-                            {business.screens_count ?? 0} screens ·{' '}
-                            {business.playlists_count ?? 0} playlists ·{' '}
-                            {business.videos_count ?? 0} videos
-                        </CardDescription>
+                            </CardTitle>
+                            <CardDescription>
+                                Updated{' '}
+                                {new Date(
+                                    business.updated_at,
+                                ).toLocaleDateString()}
+                            </CardDescription>
+                        </div>
                     </div>
                     <Button
                         variant="ghost"
                         size="sm"
                         onClick={onDelete}
                         disabled={processing}
-                        className="text-destructive hover:text-destructive"
+                        className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive"
                     >
                         Delete
                     </Button>
                 </div>
             </CardHeader>
             <CardContent>
-                <Link href={show.url({ business: business.id })}>
-                    <Button variant="outline" size="sm">
-                        Manage
-                    </Button>
-                </Link>
+                <div className="flex items-center justify-between gap-2">
+                    <div className="flex gap-4">
+                        {stats.map((stat) => (
+                            <span
+                                key={stat.label}
+                                className="flex items-center gap-1.5 text-sm text-muted-foreground"
+                            >
+                                <stat.icon className="size-4" />
+                                <span className="font-semibold text-foreground">
+                                    {stat.value}
+                                </span>
+                                {stat.label}
+                            </span>
+                        ))}
+                    </div>
+                    <ArrowUpRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" />
+                </div>
             </CardContent>
         </Card>
     );
 }
 
 export default function Dashboard({ businesses }: { businesses: Business[] }) {
+    const totals = businesses.reduce(
+        (acc, b) => ({
+            screens: acc.screens + (b.screens_count ?? 0),
+            playlists: acc.playlists + (b.playlists_count ?? 0),
+            videos: acc.videos + (b.videos_count ?? 0),
+        }),
+        { screens: 0, playlists: 0, videos: 0 },
+    );
+
+    const overview = [
+        { icon: Building2, value: businesses.length, label: 'Businesses' },
+        { icon: MonitorPlay, value: totals.screens, label: 'Screens' },
+        { icon: ListVideo, value: totals.playlists, label: 'Playlists' },
+        { icon: Clapperboard, value: totals.videos, label: 'Videos' },
+    ];
+
     return (
         <>
             <Head title="Dashboard" />
-            <div className="flex flex-1 flex-col gap-4 p-4">
-                <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-1 flex-col gap-6 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
                     <Heading
                         title="Your businesses"
                         description="Pick a business to manage its screens, playlists and videos."
@@ -152,25 +214,53 @@ export default function Dashboard({ businesses }: { businesses: Business[] }) {
                 </div>
 
                 {businesses.length === 0 ? (
-                    <Card>
-                        <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
-                            <p className="font-medium">No businesses yet</p>
-                            <p className="text-sm text-muted-foreground">
-                                Create your first business to start managing
-                                screens and content.
+                    <Card className="overflow-hidden">
+                        <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
+                            <span className="flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                                <Building2 className="size-7" />
+                            </span>
+                            <p className="text-lg font-semibold">
+                                No businesses yet
                             </p>
-                            <Badge variant="secondary">Step 1 of 3</Badge>
+                            <p className="max-w-sm text-sm text-muted-foreground">
+                                Create your first business to start pairing
+                                screens and publishing content.
+                            </p>
+                            <div className="pt-2">
+                                <CreateBusinessDialog />
+                            </div>
                         </CardContent>
                     </Card>
                 ) : (
-                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                        {businesses.map((business) => (
-                            <BusinessCard
-                                key={business.id}
-                                business={business}
-                            />
-                        ))}
-                    </div>
+                    <>
+                        <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+                            {overview.map((item) => (
+                                <Card key={item.label}>
+                                    <CardContent className="flex items-center gap-3 pt-6">
+                                        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+                                            <item.icon className="size-5" />
+                                        </span>
+                                        <div>
+                                            <div className="text-2xl leading-none font-bold">
+                                                {item.value}
+                                            </div>
+                                            <div className="mt-1 text-sm text-muted-foreground">
+                                                {item.label}
+                                            </div>
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            ))}
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                            {businesses.map((business) => (
+                                <BusinessCard
+                                    key={business.id}
+                                    business={business}
+                                />
+                            ))}
+                        </div>
+                    </>
                 )}
             </div>
         </>

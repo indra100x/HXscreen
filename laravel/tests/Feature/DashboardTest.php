@@ -34,3 +34,18 @@ test('users cannot visit another user’s business page', function () {
     $response = $this->get(route('business.show', $business));
     $response->assertForbidden();
 });
+
+test('a session-authenticated browser can write to the api like the dashboard does', function () {
+    $user = User::factory()->create();
+
+    $this->post(route('login.store'), [
+        'email' => $user->email,
+        'password' => 'password',
+    ]);
+    $this->assertAuthenticated();
+
+    $response = $this->withHeader('Referer', 'http://127.0.0.1:8000/dashboard')
+        ->postJson('/api/businesses', ['name' => 'Acme']);
+
+    $response->assertCreated();
+});

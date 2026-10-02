@@ -2,6 +2,7 @@ import { router, useHttp } from '@inertiajs/react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import InputError from '@/components/input-error';
+import RenameDialog from '@/components/business/rename-dialog';
 import { Button } from '@/components/ui/button';
 import {
     Card,
@@ -28,12 +29,13 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
-import { destroy, store } from '@/routes/playlists';
+import { destroy, store, update } from '@/routes/playlists';
 import {
     destroy as removeVideo,
     order as orderVideos,
     store as addVideo,
 } from '@/routes/playlists/videos';
+import { toastApiError } from '@/lib/api-errors';
 import type { Playlist, Video } from '@/types';
 
 function CreatePlaylistDialog({ businessId }: { businessId: string }) {
@@ -52,7 +54,7 @@ function CreatePlaylistDialog({ businessId }: { businessId: string }) {
                 toast.success('Playlist created');
                 router.reload();
             },
-            onError: () => toast.error('Could not create playlist'),
+            onError: toastApiError('Could not create playlist'),
         });
     }
 
@@ -99,7 +101,9 @@ function AddVideoDialog({
     videos: Video[];
 }) {
     const [open, setOpen] = useState(false);
-    const { data, setData, post, processing } = useHttp({ video_id: '' });
+    const { data, setData, post, processing, errors } = useHttp({
+        video_id: '',
+    });
 
     const attachedIds = new Set((playlist.videos ?? []).map((v) => v.id));
     const available = videos.filter((v) => !attachedIds.has(v.id));
@@ -112,7 +116,7 @@ function AddVideoDialog({
                 toast.success('Video added');
                 router.reload();
             },
-            onError: () => toast.error('Could not add video'),
+            onError: toastApiError('Could not add video'),
         });
     }
 
@@ -150,6 +154,7 @@ function AddVideoDialog({
                             ))}
                         </SelectContent>
                     </Select>
+                    <InputError message={errors.video_id} />
                     <DialogFooter>
                         <Button
                             type="submit"
@@ -190,7 +195,7 @@ function PlaylistCard({
                 toast.success('Playlist deleted');
                 router.reload();
             },
-            onError: () => toast.error('Could not delete playlist'),
+            onError: toastApiError('Could not delete playlist'),
         });
     }
 
@@ -202,7 +207,7 @@ function PlaylistCard({
             ),
             {
                 onSuccess: () => router.reload(),
-                onError: () => toast.error('Could not remove video'),
+                onError: toastApiError('Could not remove video'),
             },
         );
     }
@@ -218,7 +223,7 @@ function PlaylistCard({
         transform(() => ({ video_ids: ids }));
         void put(orderVideos.url({ playlist: playlist.id }), {
             onSuccess: () => router.reload(),
-            onError: () => toast.error('Could not reorder videos'),
+            onError: toastApiError('Could not reorder videos'),
         });
     }
 
@@ -233,15 +238,23 @@ function PlaylistCard({
                             {ordered.length === 1 ? '' : 's'}
                         </CardDescription>
                     </div>
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={onDelete}
-                        disabled={processing}
-                        className="text-destructive hover:text-destructive"
-                    >
-                        Delete
-                    </Button>
+                    <div className="flex shrink-0 items-center">
+                        <RenameDialog
+                            title="playlist"
+                            currentName={playlist.name}
+                            url={update.url({ playlist: playlist.id })}
+                            successMessage="Playlist renamed"
+                        />
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={onDelete}
+                            disabled={processing}
+                            className="text-destructive hover:text-destructive"
+                        >
+                            Delete
+                        </Button>
+                    </div>
                 </div>
             </CardHeader>
             <CardContent className="space-y-3">

@@ -1,7 +1,9 @@
 import { router, useHttp } from '@inertiajs/react';
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { CalendarClock } from 'lucide-react';
 import InputError from '@/components/input-error';
+import RenameDialog from '@/components/business/rename-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -29,27 +31,30 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
-import { destroy, pair, store } from '@/routes/screens';
+import { destroy, pair, store, update } from '@/routes/screens';
 import {
     destroy as detachPlaylist,
     store as attachPlaylist,
+    update as updatePlaylist,
 } from '@/routes/screens/playlists';
+import { toastApiError } from '@/lib/api-errors';
 import type { Playlist, Screen } from '@/types';
 
 function screenStatus(screen: Screen): {
     label: string;
     variant: 'default' | 'secondary' | 'outline';
+    live: boolean;
 } {
     if (!screen.paired_at) {
-        return { label: 'Unpaired', variant: 'outline' };
+        return { label: 'Unpaired', variant: 'outline', live: false };
     }
     if (
         screen.last_seen_at &&
         Date.now() - new Date(screen.last_seen_at).getTime() < 5 * 60 * 1000
     ) {
-        return { label: 'Online', variant: 'default' };
+        return { label: 'Online', variant: 'default', live: true };
     }
-    return { label: 'Offline', variant: 'secondary' };
+    return { label: 'Offline', variant: 'secondary', live: false };
 }
 
 function PairScreenDialog({ businessId }: { businessId: string }) {
@@ -68,7 +73,7 @@ function PairScreenDialog({ businessId }: { businessId: string }) {
                 toast.success('Screen paired');
                 router.reload();
             },
-            onError: () => toast.error('Pairing failed — check the code'),
+            onError: toastApiError('Pairing failed — check the code'),
         });
     }
 
@@ -150,7 +155,7 @@ function AssignPlaylistDialog({
                 toast.success('Playlist assigned');
                 router.reload();
             },
-            onError: () => toast.error('Could not assign playlist'),
+            onError: toastApiError('Could not assign playlist'),
         });
     }
 
@@ -188,6 +193,7 @@ function AssignPlaylistDialog({
                             ))}
                         </SelectContent>
                     </Select>
+                    <InputError message={errors.playlist_id} />
                     <div className="grid gap-2">
                         <Label htmlFor="assign-start">
                             Start time (optional)
@@ -228,6 +234,98 @@ function AssignPlaylistDialog({
     );
 }
 
+function toDateTimeLocal(value: string | null | undefined): string {
+    if (!value) {
+        return '';
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return '';
+    }
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function EditScheduleDialog({
+    screenId,
+    playlist,
+}: {
+    screenId: string;
+    playlist: Playlist;
+}) {
+    const [open, setOpen] = useState(false);
+    const { data, setData, put, processing, errors } = useHttp({
+        playlist_id: playlist.id,
+        start_time: toDateTimeLocal(playlist.pivot?.start_time),
+        end_time: toDateTimeLocal(playlist.pivot?.end_time),
+    });
+
+    function submit(e: React.FormEvent) {
+        e.preventDefault();
+        void put(updatePlaylist.url({ screen: screenId }), {
+            onSuccess: () => {
+                setOpen(false);
+                toast.success('Schedule updated');
+                router.reload();
+            },
+            onError: toastApiError('Could not update schedule'),
+        });
+    }
+
+    return (
+        <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild>
+                <Button variant="ghost" size="sm" title="Edit schedule">
+                    <CalendarClock className="size-4" />
+                </Button>
+            </DialogTrigger>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Schedule “{playlist.name}”</DialogTitle>
+                    <DialogDescription>
+                        Leave empty to play without a time window.
+                    </DialogDescription>
+                </DialogHeader>
+                <form onSubmit={submit} className="space-y-4">
+                    <div className="grid gap-2">
+                        <Label htmlFor={`sched-start-${playlist.id}`}>
+                            Start time
+                        </Label>
+                        <Input
+                            id={`sched-start-${playlist.id}`}
+                            type="datetime-local"
+                            value={data.start_time}
+                            onChange={(e) =>
+                                setData('start_time', e.target.value)
+                            }
+                        />
+                        <InputError message={errors.start_time} />
+                    </div>
+                    <div className="grid gap-2">
+                        <Label htmlFor={`sched-end-${playlist.id}`}>
+                            End time
+                        </Label>
+                        <Input
+                            id={`sched-end-${playlist.id}`}
+                            type="datetime-local"
+                            value={data.end_time}
+                            onChange={(e) =>
+                                setData('end_time', e.target.value)
+                            }
+                        />
+                        <InputError message={errors.end_time} />
+                    </div>
+                    <DialogFooter>
+                        <Button type="submit" disabled={processing}>
+                            Save
+                        </Button>
+                    </DialogFooter>
+                </form>
+            </DialogContent>
+        </Dialog>
+    );
+}
+
 function ScreenCard({
     screen,
     playlists,
@@ -247,7 +345,7 @@ function ScreenCard({
                 toast.success('Screen deleted');
                 router.reload();
             },
-            onError: () => toast.error('Could not delete screen'),
+            onError: toastApiError('Could not delete screen'),
         });
     }
 
@@ -262,7 +360,7 @@ function ScreenCard({
                     toast.success('Playlist removed');
                     router.reload();
                 },
-                onError: () => toast.error('Could not remove playlist'),
+                onError: toastApiError('Could not remove playlist'),
             },
         );
     }
@@ -275,6 +373,12 @@ function ScreenCard({
                         <CardTitle className="flex items-center gap-2">
                             {screen.name}
                             <Badge variant={status.variant}>
+                                {status.live && (
+                                    <span className="relative mr-1 flex size-1.5">
+                                        <span className="absolute inline-flex size-full animate-ping rounded-full bg-current opacity-75" />
+                                        <span className="relative inline-flex size-1.5 rounded-full bg-current" />
+                                    </span>
+                                )}
                                 {status.label}
                             </Badge>
                         </CardTitle>
@@ -282,15 +386,23 @@ function ScreenCard({
                             {screen.device_id}
                         </CardDescription>
                     </div>
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={onDelete}
-                        disabled={processing}
-                        className="text-destructive hover:text-destructive"
-                    >
-                        Delete
-                    </Button>
+                    <div className="flex shrink-0 items-center">
+                        <RenameDialog
+                            title="screen"
+                            currentName={screen.name}
+                            url={update.url({ screen: screen.id })}
+                            successMessage="Screen renamed"
+                        />
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={onDelete}
+                            disabled={processing}
+                            className="text-destructive hover:text-destructive"
+                        >
+                            Delete
+                        </Button>
+                    </div>
                 </div>
             </CardHeader>
             <CardContent className="space-y-3">
@@ -328,13 +440,19 @@ function ScreenCard({
                                         </span>
                                     )}
                                 </span>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => onDetach(p.id)}
-                                >
-                                    Remove
-                                </Button>
+                                <div className="flex shrink-0">
+                                    <EditScheduleDialog
+                                        screenId={screen.id}
+                                        playlist={p}
+                                    />
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => onDetach(p.id)}
+                                    >
+                                        Remove
+                                    </Button>
+                                </div>
                             </li>
                         ))}
                     </ul>
@@ -361,7 +479,7 @@ function CreateScreenDialog({ businessId }: { businessId: string }) {
                 toast.success('Screen added — pair it from the TV');
                 router.reload();
             },
-            onError: () => toast.error('Could not add screen'),
+            onError: toastApiError('Could not add screen'),
         });
     }
 

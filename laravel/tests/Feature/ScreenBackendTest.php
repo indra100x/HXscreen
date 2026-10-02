@@ -199,3 +199,62 @@ it('refuses to order videos from another user’s business', function () {
 
     expect($playlist->videos()->count())->toBe(0);
 });
+
+it('updates a playlist schedule on a screen', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    [$token, $screen] = pairDeviceFor($this, $user, $business, 'tv-5');
+
+    $playlist = Playlist::create(['name' => 'Loop', 'busniss_id' => $business->id]);
+    $loose = Playlist::create(['name' => 'Loose', 'busniss_id' => $business->id]);
+
+    $this->actingAs($user, 'sanctum')
+        ->postJson("/api/screens/{$screen->id}/playlists", ['playlist_id' => $playlist->id])
+        ->assertOk();
+
+    $this->actingAs($user, 'sanctum')
+        ->putJson("/api/screens/{$screen->id}/playlists", ['playlist_id' => $loose->id])
+        ->assertStatus(422);
+
+    $this->actingAs($user, 'sanctum')
+        ->putJson("/api/screens/{$screen->id}/playlists", [
+            'playlist_id' => $playlist->id,
+            'start_time' => now()->subHour()->toDateTimeString(),
+            'end_time' => now()->subMinute()->toDateTimeString(),
+        ])
+        ->assertOk();
+
+    $content = $this->getJson('/api/device/content?device_token='.$token)->assertOk();
+
+    expect($content->json('playlists'))->toBe([]);
+});
+
+it('lets a tv claim its token once the dashboard pairs it', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    $code = $this->postJson('/api/screens/request-pairing-code', [
+        'device_id' => 'tv-claim',
+    ])->assertOk()->json('pairing_code');
+
+    $this->postJson('/api/device/claim', [
+        'device_id' => 'tv-claim',
+        'pairing_code' => $code,
+    ])->assertOk()->assertJsonPath('paired', false);
+
+    $this->actingAs($user, 'sanctum')->postJson('/api/screens/pair', [
+        'device_id' => 'tv-claim',
+        'pairing_code' => $code,
+        'busniss_id' => $business->id,
+    ])->assertOk();
+
+    $token = $this->postJson('/api/device/claim', [
+        'device_id' => 'tv-claim',
+        'pairing_code' => $code,
+    ])->assertOk()->assertJsonPath('paired', true)->json('device_token');
+
+    expect($token)->not->toBeNull();
+
+    $this->getJson('/api/device/content?device_token='.$token)->assertOk();
+});

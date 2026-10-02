@@ -288,6 +288,82 @@ class ScreenController extends Controller
         return response()->json(['message' => 'Playlist removed from screen successfully'], 200);
     }
 
+    public function updatePlaylistSchedule(Request $request, Screen $screen)
+    {
+        $user = auth()->user();
+
+        $this->authorizeScreen($user, $screen);
+
+        $request->validate([
+            'playlist_id' => 'required|exists:playlist,id',
+            'start_time' => 'nullable|date',
+            'end_time' => 'nullable|date|after_or_equal:start_time',
+        ]);
+
+        if (! $screen->screenPlaylists()->where('playlist.id', $request->playlist_id)->exists()) {
+            return response()->json(['message' => 'Playlist is not assigned to screen'], 422);
+        }
+
+        $screen->screenPlaylists()->updateExistingPivot($request->playlist_id, [
+            'start_time' => $request->start_time,
+            'end_time' => $request->end_time,
+        ]);
+
+        return response()->json(['message' => 'Schedule updated successfully'], 200);
+    }
+
+    /**
+     * Called by the TV while it shows the pairing code. Returns whether the
+     * screen has been paired yet, and hands over a device token exactly once
+     * the dashboard completes pairing.
+     */
+    public function claimDevice(Request $request)
+    {
+        $request->validate([
+            'device_id' => 'required|string|max:255',
+            'pairing_code' => 'required|string|max:20',
+        ]);
+
+        $screen = Screen::where('device_id', $request->device_id)->first();
+
+        if (! $screen) {
+            return response()->json(['message' => 'Device not found'], 404);
+        }
+
+        if (
+            $screen->pairing_code &&
+            strtoupper($screen->pairing_code) === strtoupper($request->pairing_code)
+        ) {
+            if ($screen->pairing_code_expires_at && $screen->pairing_code_expires_at->isPast()) {
+                return response()->json(['message' => 'Pairing code expired'], 422);
+            }
+
+            return response()->json(['paired' => false], 200);
+        }
+
+        if ($screen->device_token) {
+            $rawToken = Str::random(64);
+
+            $screen->device_token = hash('sha256', $rawToken);
+            $screen->device_token_expires_at = now()->addDays(30);
+            $screen->last_seen_at = now();
+            $screen->save();
+
+            Log::info('ScreenController@claimDevice', [
+                'device_id' => $screen->device_id,
+            ]);
+
+            return response()->json([
+                'paired' => true,
+                'device_id' => $screen->device_id,
+                'device_token' => $rawToken,
+                'expires_in_seconds' => 30 * 24 * 60 * 60,
+            ], 200);
+        }
+
+        return response()->json(['message' => 'Invalid pairing code'], 422);
+    }
+
     /**
      * Rotate a valid device token. Authenticated by device token, not Sanctum.
      */

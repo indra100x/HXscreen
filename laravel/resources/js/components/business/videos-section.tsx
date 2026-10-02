@@ -21,7 +21,9 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { destroy, store } from '@/routes/videos';
+import { destroy, store, update } from '@/routes/videos';
+import RenameDialog from '@/components/business/rename-dialog';
+import { toastApiError } from '@/lib/api-errors';
 import type { Video } from '@/types';
 import { publicFileUrl } from '@/lib/media';
 
@@ -36,6 +38,10 @@ function UploadVideoDialog({ businessId }: { businessId: string }) {
 
     function submit(e: React.FormEvent) {
         e.preventDefault();
+        if (data.video && data.video.size > 100 * 1024 * 1024) {
+            toast.error('Video must be smaller than 100 MB.');
+            return;
+        }
         void post(store.url(), {
             onSuccess: () => {
                 reset();
@@ -43,7 +49,9 @@ function UploadVideoDialog({ businessId }: { businessId: string }) {
                 toast.success('Video uploaded');
                 router.reload();
             },
-            onError: () => toast.error('Upload failed'),
+            onError: toastApiError(
+                'Upload failed. Check the file type and size.',
+            ),
         });
     }
 
@@ -120,7 +128,7 @@ function VideoCard({ video }: { video: Video }) {
                 toast.success('Video deleted');
                 router.reload();
             },
-            onError: () => toast.error('Could not delete video'),
+            onError: toastApiError('Could not delete video'),
         });
     }
 
@@ -136,15 +144,24 @@ function VideoCard({ video }: { video: Video }) {
                             {video.url}
                         </CardDescription>
                     </div>
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={onDelete}
-                        disabled={processing}
-                        className="shrink-0 text-destructive hover:text-destructive"
-                    >
-                        Delete
-                    </Button>
+                    <div className="flex shrink-0 items-center">
+                        <RenameDialog
+                            title="video"
+                            currentName={video.name ?? ''}
+                            url={update.url({ video: video.id })}
+                            successMessage="Video renamed"
+                            maxLength={255}
+                        />
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={onDelete}
+                            disabled={processing}
+                            className="shrink-0 text-destructive hover:text-destructive"
+                        >
+                            Delete
+                        </Button>
+                    </div>
                 </div>
             </CardHeader>
             <CardContent className="space-y-2">
