@@ -13,10 +13,10 @@ return new class extends Migration
     {
         Schema::create('busniss', function (Blueprint $table) {
             $table->uuid('id')->primary();
-            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->foreignUuid('user_id')->constrained('users')->cascadeOnDelete();
             $table->string('name');
-            $table->timestamp('created_at')->useCurrent();
-            });
+            $table->timestamps();
+        });
             
     }
 
