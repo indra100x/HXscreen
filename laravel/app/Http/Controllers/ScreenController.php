@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Business;
+use App\Models\Playlist;
 use App\Models\Screen;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -41,6 +42,8 @@ class ScreenController extends Controller
             'device_id' => 'required|string|max:255',
         ]);
 
+        $this->ensureBusinessOwned($user, $request->busniss_id);
+
         $screen = Screen::create([
             'name' => $request->name,
             'busniss_id' => $request->busniss_id,
@@ -62,9 +65,7 @@ class ScreenController extends Controller
             'screen_id' => $screen->id,
         ]);
 
-        if ($screen->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizeScreen($user, $screen);
 
         return response()->json(['screen' => $screen]);
     }
@@ -78,9 +79,7 @@ class ScreenController extends Controller
             'screen_id' => $screen->id,
         ]);
 
-        if ($screen->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizeScreen($user, $screen);
 
         $screen->delete();
 
@@ -97,15 +96,17 @@ class ScreenController extends Controller
             'payload' => $request->only(['name', 'device_id', 'busniss_id']),
         ]);
 
-        if ($screen->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizeScreen($user, $screen);
 
         $request->validate([
             'name' => 'sometimes|required|string|max:50',
             'device_id' => 'sometimes|required|string|max:255',
             'busniss_id' => 'sometimes|required|exists:busniss,id',
         ]);
+
+        if ($request->filled('busniss_id')) {
+            $this->ensureBusinessOwned($user, $request->busniss_id);
+        }
 
         $screen->update($request->only(['name', 'device_id', 'busniss_id']));
 
@@ -142,7 +143,6 @@ class ScreenController extends Controller
 
         Log::info('ScreenController@requestPairingCode', [
             'device_id' => $screen->device_id,
-            'pairing_code' => $screen->pairing_code,
         ]);
 
         return response()->json([
@@ -182,9 +182,12 @@ class ScreenController extends Controller
             return response()->json(['message' => 'Pairing code expired'], 422);
         }
 
+        // Store only the hash; the raw token is shown once and never stored.
+        $rawToken = Str::random(64);
+
         $screen->busniss_id = $business->id;
         $screen->paired_at = now();
-        $screen->device_token = hash('sha256', Str::random(64));
+        $screen->device_token = hash('sha256', $rawToken);
         $screen->device_token_expires_at = now()->addDays(30);
         $screen->pairing_code = null;
         $screen->pairing_code_expires_at = null;
@@ -200,17 +203,132 @@ class ScreenController extends Controller
             'message' => 'Screen paired successfully',
             'device_id' => $screen->device_id,
             'busniss_id' => $screen->busniss_id,
-            'device_token' => $screen->device_token,
+            'device_token' => $rawToken,
         ], 200);
     }
 
-    public function heartbeat(Request $request)
+    public function heartbeat(Request $request, Screen $screen)
     {
         $token = $request->bearerToken() ?: $request->input('device_token');
 
         Log::info('ScreenController@heartbeat', [
+            'screen_id' => $screen->id,
             'device_token_present' => filled($token),
         ]);
+
+        if (! $token || ! $screen->device_token || ! hash_equals($screen->device_token, hash('sha256', $token))) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        if ($screen->device_token_expires_at && $screen->device_token_expires_at->isPast()) {
+            return response()->json(['message' => 'Device token expired'], 401);
+        }
+
+        $screen->last_seen_at = now();
+        $screen->save();
+
+        return response()->json([
+            'message' => 'Heartbeat received successfully',
+            'screen' => $screen,
+        ], 200);
+    }
+
+    public function getPlaylists(Screen $screen)
+    {
+        $user = auth()->user();
+
+        $this->authorizeScreen($user, $screen);
+
+        return response()->json($screen->screenPlaylists()->with('videos')->get());
+    }
+
+    public function attachPlaylist(Request $request, Screen $screen)
+    {
+        $user = auth()->user();
+
+        $this->authorizeScreen($user, $screen);
+
+        $request->validate([
+            'playlist_id' => 'required|exists:playlist,id',
+            'start_time' => 'nullable|date',
+            'end_time' => 'nullable|date|after_or_equal:start_time',
+        ]);
+
+        $playlist = Playlist::findOrFail($request->playlist_id);
+
+        if (! $playlist->business || $playlist->business->user_id !== $user->id) {
+            abort(403);
+        }
+
+        if ($screen->screenPlaylists()->where('playlist.id', $playlist->id)->exists()) {
+            return response()->json(['message' => 'Playlist already assigned to screen'], 409);
+        }
+
+        $screen->screenPlaylists()->attach($playlist->id, [
+            'id' => (string) Str::uuid(),
+            'start_time' => $request->start_time,
+            'end_time' => $request->end_time,
+        ]);
+
+        return response()->json(['message' => 'Playlist assigned to screen successfully'], 200);
+    }
+
+    public function detachPlaylist(Request $request, Screen $screen)
+    {
+        $user = auth()->user();
+
+        $this->authorizeScreen($user, $screen);
+
+        $request->validate([
+            'playlist_id' => 'required|exists:playlist,id',
+        ]);
+
+        $screen->screenPlaylists()->detach($request->playlist_id);
+
+        return response()->json(['message' => 'Playlist removed from screen successfully'], 200);
+    }
+
+    /**
+     * Rotate a valid device token. Authenticated by device token, not Sanctum.
+     */
+    public function refreshDeviceToken(Request $request)
+    {
+        $token = $request->bearerToken() ?: $request->input('device_token');
+
+        if (! $token) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        $screen = Screen::where('device_token', hash('sha256', $token))->first();
+
+        if (! $screen) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        if ($screen->device_token_expires_at && $screen->device_token_expires_at->isPast()) {
+            return response()->json(['message' => 'Device token expired'], 401);
+        }
+
+        $rawToken = Str::random(64);
+
+        $screen->device_token = hash('sha256', $rawToken);
+        $screen->device_token_expires_at = now()->addDays(30);
+        $screen->last_seen_at = now();
+        $screen->save();
+
+        return response()->json([
+            'device_id' => $screen->device_id,
+            'device_token' => $rawToken,
+            'expires_in_seconds' => 30 * 24 * 60 * 60,
+        ], 200);
+    }
+
+    /**
+     * Content feed for a paired device. Authenticated by device token, not Sanctum.
+     */
+    public function deviceContent(Request $request)
+    {
+        $token = $request->bearerToken() ?: $request->input('device_token');
 
         if (! $token) {
             return response()->json(['message' => 'Unauthorized'], 401);
@@ -229,9 +347,43 @@ class ScreenController extends Controller
         $screen->last_seen_at = now();
         $screen->save();
 
+        $now = now();
+
+        $playlists = $screen->screenPlaylists()
+            ->where(function ($query) use ($now) {
+                $query->whereNull('screen_playlist.start_time')
+                    ->orWhere('screen_playlist.start_time', '<=', $now);
+            })
+            ->where(function ($query) use ($now) {
+                $query->whereNull('screen_playlist.end_time')
+                    ->orWhere('screen_playlist.end_time', '>=', $now);
+            })
+            ->with('videos')
+            ->get();
+
         return response()->json([
-            'message' => 'Heartbeat received successfully',
             'screen' => $screen,
+            'playlists' => $playlists,
         ], 200);
+    }
+
+    protected function authorizeScreen($user, Screen $screen): void
+    {
+        if (! $screen->business) {
+            abort(404);
+        }
+
+        if ($screen->business->user_id !== $user->id) {
+            abort(403);
+        }
+    }
+
+    protected function ensureBusinessOwned($user, string $businessId): void
+    {
+        $business = Business::findOrFail($businessId);
+
+        if ($business->user_id !== $user->id) {
+            abort(403);
+        }
     }
 }

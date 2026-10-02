@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Business;
 use App\Models\Playlist;
+use App\Models\Video;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class PlaylistController extends Controller
 {
@@ -38,6 +41,8 @@ class PlaylistController extends Controller
             'busniss_id' => 'required|exists:busniss,id',
         ]);
 
+        $this->ensureBusinessOwned($user, $request->busniss_id);
+
         $playlist = Playlist::create([
             'name' => $request->name,
             'busniss_id' => $request->busniss_id,
@@ -58,9 +63,7 @@ class PlaylistController extends Controller
             'playlist_id' => $playlist->id,
         ]);
 
-        if ($playlist->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizePlaylist($user, $playlist);
 
         return response()->json(['playlist' => $playlist]);
     }
@@ -74,9 +77,7 @@ class PlaylistController extends Controller
             'playlist_id' => $playlist->id,
         ]);
 
-        if ($playlist->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizePlaylist($user, $playlist);
 
         $playlist->delete();
 
@@ -93,9 +94,7 @@ class PlaylistController extends Controller
             'payload' => $request->only(['name']),
         ]);
 
-        if ($playlist->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizePlaylist($user, $playlist);
 
         $request->validate([
             'name' => 'required|string|max:50',
@@ -121,15 +120,28 @@ class PlaylistController extends Controller
             'payload' => $request->only(['video_id']),
         ]);
 
-        if ($playlist->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizePlaylist($user, $playlist);
 
         $request->validate([
             'video_id' => 'required|exists:video,id',
         ]);
 
-        $playlist->videos()->attach($request->video_id);
+        $video = Video::findOrFail($request->video_id);
+
+        if (! $video->business || $video->business->user_id !== $user->id) {
+            abort(403);
+        }
+
+        if ($playlist->videos()->where('video.id', $video->id)->exists()) {
+            return response()->json(['message' => 'Video already in playlist'], 409);
+        }
+
+        $maxOrder = $playlist->videos()->max('playlist_video.order') ?? -1;
+
+        $playlist->videos()->attach($video->id, [
+            'id' => (string) Str::uuid(),
+            'order' => $maxOrder + 1,
+        ]);
 
         return response()->json([
             'message' => 'Video added to playlist successfully',
@@ -146,9 +158,7 @@ class PlaylistController extends Controller
             'payload' => $request->only(['video_id']),
         ]);
 
-        if ($playlist->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizePlaylist($user, $playlist);
 
         $request->validate([
             'video_id' => 'required|exists:video,id',
@@ -170,9 +180,7 @@ class PlaylistController extends Controller
             'playlist_id' => $playlist->id,
         ]);
 
-        if ($playlist->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizePlaylist($user, $playlist);
 
         return response()->json($playlist->videos);
     }
@@ -187,19 +195,60 @@ class PlaylistController extends Controller
             'payload' => $request->only(['video_ids']),
         ]);
 
-        if ($playlist->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizePlaylist($user, $playlist);
 
         $request->validate([
             'video_ids' => 'required|array',
             'video_ids.*' => 'exists:video,id',
         ]);
 
-        $playlist->videos()->sync($request->video_ids);
+        $ownedIds = Video::whereIn('id', $request->video_ids)
+            ->whereHas('business', fn ($query) => $query->where('user_id', $user->id))
+            ->pluck('id')
+            ->all();
+
+        if (count($ownedIds) !== count(array_unique($request->video_ids))) {
+            abort(403);
+        }
+
+        $existingOrders = $playlist->videos()
+            ->whereIn('video.id', $request->video_ids)
+            ->get()
+            ->keyBy('id');
+
+        $sync = [];
+
+        foreach ($request->video_ids as $index => $videoId) {
+            $sync[$videoId] = [
+                'id' => $existingOrders->get($videoId)?->pivot->id ?? (string) Str::uuid(),
+                'order' => $index,
+            ];
+        }
+
+        $playlist->videos()->sync($sync);
 
         return response()->json([
             'message' => 'Videos ordered successfully',
         ], 200);
+    }
+
+    protected function authorizePlaylist($user, Playlist $playlist): void
+    {
+        if (! $playlist->business) {
+            abort(404);
+        }
+
+        if ($playlist->business->user_id !== $user->id) {
+            abort(403);
+        }
+    }
+
+    protected function ensureBusinessOwned($user, string $businessId): void
+    {
+        $business = Business::findOrFail($businessId);
+
+        if ($business->user_id !== $user->id) {
+            abort(403);
+        }
     }
 }

@@ -2,13 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Business;
 use App\Models\Video;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class VideoController extends Controller
 {
+    protected string $disk = 'public';
+
     public function index(Request $request)
     {
         $user = $request->user();
@@ -36,21 +40,25 @@ class VideoController extends Controller
         $request->validate([
             'video' => 'required|file|mimetypes:video/mp4,video/quicktime,video/x-msvideo,video/webm|max:102400',
             'busniss_id' => 'required|exists:busniss,id',
+            'name' => 'nullable|string|max:255',
         ]);
 
+        $this->ensureBusinessOwned($user, $request->busniss_id);
+
         $file = $request->file('video');
-        $filename = time().'_'.$file->getClientOriginalName();
-        $path = $file->storeAs('videos', $filename, 's3');
+        $filename = (string) Str::uuid().'_'.$file->getClientOriginalName();
+        $path = $file->storeAs('videos', $filename, $this->disk);
 
         $video = Video::create([
             'busniss_id' => $request->busniss_id,
+            'name' => $request->name ?? $file->getClientOriginalName(),
             'url' => $path,
         ]);
 
         return response()->json([
             'message' => 'Video stored successfully',
             'video' => $video,
-            'url' => Storage::disk('s3')->url($path),
+            'url' => Storage::disk($this->disk)->url($path),
         ], 201);
     }
 
@@ -63,9 +71,7 @@ class VideoController extends Controller
             'video_id' => $video->id,
         ]);
 
-        if ($video->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizeVideo($user, $video);
 
         return response()->json(['video' => $video]);
     }
@@ -79,12 +85,10 @@ class VideoController extends Controller
             'video_id' => $video->id,
         ]);
 
-        if ($video->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizeVideo($user, $video);
 
-        if ($video->url && Storage::disk('s3')->exists($video->url)) {
-            Storage::disk('s3')->delete($video->url);
+        if ($video->url && Storage::disk($this->disk)->exists($video->url)) {
+            Storage::disk($this->disk)->delete($video->url);
         }
 
         $video->delete();
@@ -102,12 +106,11 @@ class VideoController extends Controller
             'payload' => $request->except(['video']),
         ]);
 
-        if ($video->business->user_id !== $user->id) {
-            abort(403);
-        }
+        $this->authorizeVideo($user, $video);
 
         $rules = [
             'busniss_id' => 'nullable|exists:busniss,id',
+            'name' => 'nullable|string|max:255',
         ];
 
         if ($request->hasFile('video')) {
@@ -118,18 +121,27 @@ class VideoController extends Controller
 
         $data = [];
 
+        if ($request->filled('name')) {
+            $data['name'] = $request->name;
+        }
+
         if ($request->filled('busniss_id')) {
+            $this->ensureBusinessOwned($user, $request->busniss_id);
             $data['busniss_id'] = $request->busniss_id;
         }
 
         if ($request->hasFile('video')) {
-            if ($video->url && Storage::disk('s3')->exists($video->url)) {
-                Storage::disk('s3')->delete($video->url);
+            if ($video->url && Storage::disk($this->disk)->exists($video->url)) {
+                Storage::disk($this->disk)->delete($video->url);
             }
 
             $file = $request->file('video');
-            $filename = time().'_'.$file->getClientOriginalName();
-            $data['url'] = $file->storeAs('videos', $filename, 's3');
+            $filename = (string) Str::uuid().'_'.$file->getClientOriginalName();
+            $data['url'] = $file->storeAs('videos', $filename, $this->disk);
+
+            if (! isset($data['name'])) {
+                $data['name'] = $file->getClientOriginalName();
+            }
         }
 
         $video->update($data);
@@ -138,5 +150,25 @@ class VideoController extends Controller
             'message' => 'Video updated successfully',
             'video' => $video,
         ], 200);
+    }
+
+    protected function authorizeVideo($user, Video $video): void
+    {
+        if (! $video->business) {
+            abort(404);
+        }
+
+        if ($video->business->user_id !== $user->id) {
+            abort(403);
+        }
+    }
+
+    protected function ensureBusinessOwned($user, string $businessId): void
+    {
+        $business = Business::findOrFail($businessId);
+
+        if ($business->user_id !== $user->id) {
+            abort(403);
+        }
     }
 }

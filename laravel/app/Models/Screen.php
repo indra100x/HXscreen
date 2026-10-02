@@ -2,10 +2,10 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
-use Illuminate\Database\Eloquent\Concerns\HasUuids;
 
 class Screen extends Model
 {
@@ -32,6 +32,11 @@ class Screen extends Model
         'last_seen_at' => 'datetime',
     ];
 
+    protected $hidden = [
+        'device_token',
+        'pairing_code',
+    ];
+
     public function business(): BelongsTo
     {
         return $this->belongsTo(Business::class, 'busniss_id');
@@ -39,6 +44,8 @@ class Screen extends Model
 
     public function screenPlaylists(): BelongsToMany
     {
-        return $this->belongsToMany(Playlist::class, 'screen_playlist', 'screen_id', 'playlist_id');
+        return $this->belongsToMany(Playlist::class, 'screen_playlist', 'screen_id', 'playlist_id')
+            ->withPivot('start_time', 'end_time')
+            ->withTimestamps();
     }
 }
