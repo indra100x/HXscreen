@@ -23,6 +23,9 @@ class Screen extends Model
         'device_token_expires_at',
         'paired_at',
         'last_seen_at',
+        'current_video_id',
+        'current_position_ms',
+        'position_reported_at',
     ];
 
     protected $casts = [
@@ -30,11 +33,16 @@ class Screen extends Model
         'device_token_expires_at' => 'datetime',
         'paired_at' => 'datetime',
         'last_seen_at' => 'datetime',
+        'current_position_ms' => 'integer',
+        'position_reported_at' => 'datetime',
+        'is_playing' => 'boolean',
+        'pending_command' => 'array',
     ];
 
     protected $hidden = [
         'device_token',
         'pairing_code',
+        'pending_command',
     ];
 
     public function business(): BelongsTo

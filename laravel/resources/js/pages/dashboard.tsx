@@ -1,10 +1,11 @@
-import { Head, router, useHttp } from '@inertiajs/react';
+import { Head, router, useHttp, usePoll } from '@inertiajs/react';
 import {
     ArrowUpRight,
     Building2,
     Clapperboard,
     ListVideo,
     MonitorPlay,
+    Tv,
 } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -29,11 +30,19 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
 import { dashboard } from '@/routes';
 import { show } from '@/routes/business';
 import { destroy, store } from '@/routes/businesses';
+import { pair as pairScreen } from '@/routes/screens';
 import { toastApiError } from '@/lib/api-errors';
-import type { Business } from '@/types';
+import type { Business, Screen } from '@/types';
 
 function CreateBusinessDialog() {
     const [open, setOpen] = useState(false);
@@ -184,7 +193,124 @@ function BusinessCard({ business }: { business: Business }) {
     );
 }
 
-export default function Dashboard({ businesses }: { businesses: Business[] }) {
+function PairRow({
+    screen,
+    businesses,
+}: {
+    screen: Screen;
+    businesses: Business[];
+}) {
+    const { data, setData, post, processing, errors } = useHttp({
+        device_id: screen.device_id,
+        pairing_code: '',
+        busniss_id: businesses.some((b) => b.id === screen.busniss_id)
+            ? (screen.busniss_id as string)
+            : (businesses[0]?.id ?? ''),
+    });
+
+    function submit(e: React.FormEvent) {
+        e.preventDefault();
+        void post(pairScreen.url(), {
+            onSuccess: () => {
+                toast.success(`“${screen.name}” paired`);
+                router.reload();
+            },
+            onError: toastApiError('Pairing failed — check the code'),
+        });
+    }
+
+    return (
+        <form
+            onSubmit={submit}
+            className="flex flex-wrap items-center gap-2 rounded-xl border px-3 py-2"
+        >
+            <span className="flex min-w-0 flex-1 items-center gap-2">
+                <Tv className="size-4 shrink-0 text-muted-foreground" />
+                <span className="truncate text-sm font-medium">
+                    {screen.name}
+                </span>
+                <span className="hidden truncate font-mono text-xs text-muted-foreground sm:inline">
+                    {screen.device_id.slice(0, 8)}…
+                </span>
+            </span>
+            {businesses.length > 1 && (
+                <Select
+                    value={data.busniss_id}
+                    onValueChange={(value) => setData('busniss_id', value)}
+                >
+                    <SelectTrigger className="w-36">
+                        <SelectValue placeholder="Business" />
+                    </SelectTrigger>
+                    <SelectContent>
+                        {businesses.map((b) => (
+                            <SelectItem key={b.id} value={b.id}>
+                                {b.name}
+                            </SelectItem>
+                        ))}
+                    </SelectContent>
+                </Select>
+            )}
+            <Input
+                value={data.pairing_code}
+                onChange={(e) => setData('pairing_code', e.target.value)}
+                placeholder="Code from TV"
+                required
+                maxLength={20}
+                className="w-32 font-mono uppercase"
+            />
+            <Button type="submit" size="sm" disabled={processing}>
+                Pair
+            </Button>
+            {(errors.pairing_code ?? errors.device_id) && (
+                <InputError message={errors.pairing_code ?? errors.device_id} />
+            )}
+        </form>
+    );
+}
+
+function ReadyToPair({
+    screens,
+    businesses,
+}: {
+    screens: Screen[];
+    businesses: Business[];
+}) {
+    if (screens.length === 0 || businesses.length === 0) {
+        return null;
+    }
+
+    return (
+        <Card className="border-dashed">
+            <CardHeader className="pb-2">
+                <CardTitle className="text-base">
+                    Ready to pair ({screens.length})
+                </CardTitle>
+                <CardDescription>
+                    These TVs asked for a pairing code. Type the code shown on
+                    each TV — no need to enter device IDs.
+                </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+                {screens.map((screen) => (
+                    <PairRow
+                        key={screen.id}
+                        screen={screen}
+                        businesses={businesses}
+                    />
+                ))}
+            </CardContent>
+        </Card>
+    );
+}
+
+export default function Dashboard({
+    businesses,
+    unpairedScreens,
+}: {
+    businesses: Business[];
+    unpairedScreens: Screen[];
+}) {
+    usePoll(20000);
     const totals = businesses.reduce(
         (acc, b) => ({
             screens: acc.screens + (b.screens_count ?? 0),
@@ -233,6 +359,10 @@ export default function Dashboard({ businesses }: { businesses: Business[] }) {
                     </Card>
                 ) : (
                     <>
+                        <ReadyToPair
+                            screens={unpairedScreens}
+                            businesses={businesses}
+                        />
                         <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
                             {overview.map((item) => (
                                 <Card key={item.label}>

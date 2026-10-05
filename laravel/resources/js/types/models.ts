@@ -16,6 +16,12 @@ export interface Screen {
     device_id: string;
     paired_at: string | null;
     last_seen_at: string | null;
+    current_video_id: string | null;
+    current_position_ms: number | null;
+    position_reported_at: string | null;
+    is_playing: boolean | null;
+    pairing_code_expires_at: string | null;
+    device_token_expires_at: string | null;
     created_at: string;
     updated_at: string;
     screen_playlists?: Playlist[];

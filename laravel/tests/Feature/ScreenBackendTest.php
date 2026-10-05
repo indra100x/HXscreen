@@ -230,6 +230,22 @@ it('updates a playlist schedule on a screen', function () {
     expect($content->json('playlists'))->toBe([]);
 });
 
+it('refuses to assign a playlist from another business to a screen', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+    $other = Business::create(['user_id' => $user->id, 'name' => 'Other']);
+
+    [$token, $screen] = pairDeviceFor($this, $user, $business, 'tv-iso');
+
+    $foreign = Playlist::create(['name' => 'Foreign', 'busniss_id' => $other->id]);
+
+    $this->actingAs($user, 'sanctum')
+        ->postJson("/api/screens/{$screen->id}/playlists", ['playlist_id' => $foreign->id])
+        ->assertStatus(422);
+
+    expect($screen->screenPlaylists()->count())->toBe(0);
+});
+
 it('lets a tv claim its token once the dashboard pairs it', function () {
     $user = User::factory()->create();
     $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
@@ -257,4 +273,88 @@ it('lets a tv claim its token once the dashboard pairs it', function () {
     expect($token)->not->toBeNull();
 
     $this->getJson('/api/device/content?device_token='.$token)->assertOk();
+});
+
+it('lists only unpaired screens with live codes and no secrets', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    [$token, $paired] = pairDeviceFor($this, $user, $business, 'tv-done');
+
+    $fresh = Screen::create(['name' => 'Fresh TV', 'busniss_id' => null, 'device_id' => 'tv-fresh']);
+    $fresh->pairing_code = 'ABC123';
+    $fresh->pairing_code_expires_at = now()->addMinutes(10);
+    $fresh->save();
+
+    $stale = Screen::create(['name' => 'Stale TV', 'busniss_id' => null, 'device_id' => 'tv-stale']);
+    $stale->pairing_code = 'OLD123';
+    $stale->pairing_code_expires_at = now()->subMinute();
+    $stale->save();
+
+    $repairing = Screen::create(['name' => 'Mine Again', 'busniss_id' => $business->id, 'device_id' => 'tv-mine']);
+    $repairing->pairing_code = 'NEW123';
+    $repairing->pairing_code_expires_at = now()->addMinutes(10);
+    $repairing->save();
+
+    $response = $this->actingAs($user, 'sanctum')->getJson('/api/screens/unpaired')->assertOk();
+
+    expect(collect($response->json('*.device_id'))->sort()->values()->all())->toBe(['tv-fresh', 'tv-mine'])
+        ->and($response->json('0.pairing_code'))->toBeNull()
+        ->and($response->json('0.device_token'))->toBeNull();
+});
+
+it('stores playback position reported with the heartbeat', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    [$token, $screen] = pairDeviceFor($this, $user, $business, 'tv-pos');
+
+    $video = Video::create(['busniss_id' => $business->id, 'name' => 'A', 'url' => 'videos/a.mp4']);
+
+    $this->postJson("/api/screens/{$screen->id}/heartbeat", [
+        'device_token' => $token,
+        'video_id' => $video->id,
+        'position_ms' => 42000,
+        'is_playing' => false,
+    ])->assertOk();
+
+    $screen->refresh();
+
+    expect($screen->current_video_id)->toBe($video->id)
+        ->and($screen->current_position_ms)->toBe(42000)
+        ->and($screen->is_playing)->toBeFalse()
+        ->and($screen->position_reported_at)->not->toBeNull();
+});
+
+it('queues a remote command and clears it once the tv acks', function () {
+    $user = User::factory()->create();
+    $other = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    [$token, $screen] = pairDeviceFor($this, $user, $business, 'tv-remote');
+
+    $this->actingAs($other, 'sanctum')
+        ->postJson("/api/screens/{$screen->id}/command", ['action' => 'pause'])
+        ->assertForbidden();
+
+    $this->actingAs($user, 'sanctum')
+        ->postJson("/api/screens/{$screen->id}/command", ['action' => 'pause'])
+        ->assertOk();
+
+    $this->actingAs($user, 'sanctum')
+        ->postJson("/api/screens/{$screen->id}/command", ['action' => 'dance'])
+        ->assertStatus(422);
+
+    $command = $this->getJson('/api/device/commands?device_token='.$token)
+        ->assertOk()->json('command');
+
+    expect($command['action'])->toBe('pause');
+
+    $this->postJson("/api/screens/{$screen->id}/heartbeat", [
+        'device_token' => $token,
+        'ack_command_id' => $command['id'],
+    ])->assertOk();
+
+    $this->getJson('/api/device/commands?device_token='.$token)
+        ->assertOk()->assertJsonPath('command', null);
 });

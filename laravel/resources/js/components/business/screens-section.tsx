@@ -3,7 +3,13 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { CalendarClock } from 'lucide-react';
 import InputError from '@/components/input-error';
+import MonitorDialog from '@/components/business/monitor-dialog';
 import RenameDialog from '@/components/business/rename-dialog';
+import {
+    formatServerUtc,
+    localInputToServerUtc,
+    serverUtcToLocalInput,
+} from '@/lib/time';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -57,7 +63,13 @@ function screenStatus(screen: Screen): {
     return { label: 'Offline', variant: 'secondary', live: false };
 }
 
-function PairScreenDialog({ businessId }: { businessId: string }) {
+function PairScreenDialog({
+    businessId,
+    unpairedScreens,
+}: {
+    businessId: string;
+    unpairedScreens: Screen[];
+}) {
     const [open, setOpen] = useState(false);
     const { data, setData, post, processing, errors } = useHttp({
         device_id: '',
@@ -91,6 +103,33 @@ function PairScreenDialog({ businessId }: { businessId: string }) {
                     </DialogDescription>
                 </DialogHeader>
                 <form onSubmit={submit} className="space-y-4">
+                    {unpairedScreens.length > 0 && (
+                        <div className="grid gap-2">
+                            <Label>Waiting TVs — tap to fill</Label>
+                            <div className="flex flex-wrap gap-2">
+                                {unpairedScreens.map((screen) => (
+                                    <Button
+                                        key={screen.id}
+                                        type="button"
+                                        variant={
+                                            data.device_id === screen.device_id
+                                                ? 'secondary'
+                                                : 'outline'
+                                        }
+                                        size="sm"
+                                        onClick={() =>
+                                            setData(
+                                                'device_id',
+                                                screen.device_id,
+                                            )
+                                        }
+                                    >
+                                        {screen.name}
+                                    </Button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
                     <div className="grid gap-2">
                         <Label htmlFor="pair-device">Device ID</Label>
                         <Input
@@ -136,7 +175,7 @@ function AssignPlaylistDialog({
     playlists: Playlist[];
 }) {
     const [open, setOpen] = useState(false);
-    const { data, setData, post, processing, errors } = useHttp({
+    const { data, setData, post, transform, processing, errors } = useHttp({
         playlist_id: '',
         start_time: '',
         end_time: '',
@@ -149,6 +188,11 @@ function AssignPlaylistDialog({
 
     function submit(e: React.FormEvent) {
         e.preventDefault();
+        transform((current) => ({
+            ...current,
+            start_time: localInputToServerUtc(current.start_time),
+            end_time: localInputToServerUtc(current.end_time),
+        }));
         void post(attachPlaylist.url({ screen: screen.id }), {
             onSuccess: () => {
                 setOpen(false);
@@ -174,7 +218,8 @@ function AssignPlaylistDialog({
                 <DialogHeader>
                     <DialogTitle>Assign playlist</DialogTitle>
                     <DialogDescription>
-                        Choose a playlist to play on {screen.name}.
+                        Choose a playlist to play on {screen.name}. Times use
+                        your local timezone.
                     </DialogDescription>
                 </DialogHeader>
                 <form onSubmit={submit} className="space-y-4">
@@ -234,18 +279,6 @@ function AssignPlaylistDialog({
     );
 }
 
-function toDateTimeLocal(value: string | null | undefined): string {
-    if (!value) {
-        return '';
-    }
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-        return '';
-    }
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
 function EditScheduleDialog({
     screenId,
     playlist,
@@ -254,14 +287,19 @@ function EditScheduleDialog({
     playlist: Playlist;
 }) {
     const [open, setOpen] = useState(false);
-    const { data, setData, put, processing, errors } = useHttp({
+    const { data, setData, put, transform, processing, errors } = useHttp({
         playlist_id: playlist.id,
-        start_time: toDateTimeLocal(playlist.pivot?.start_time),
-        end_time: toDateTimeLocal(playlist.pivot?.end_time),
+        start_time: serverUtcToLocalInput(playlist.pivot?.start_time),
+        end_time: serverUtcToLocalInput(playlist.pivot?.end_time),
     });
 
     function submit(e: React.FormEvent) {
         e.preventDefault();
+        transform((current) => ({
+            ...current,
+            start_time: localInputToServerUtc(current.start_time),
+            end_time: localInputToServerUtc(current.end_time),
+        }));
         void put(updatePlaylist.url({ screen: screenId }), {
             onSuccess: () => {
                 setOpen(false);
@@ -283,7 +321,8 @@ function EditScheduleDialog({
                 <DialogHeader>
                     <DialogTitle>Schedule “{playlist.name}”</DialogTitle>
                     <DialogDescription>
-                        Leave empty to play without a time window.
+                        Leave empty to play without a time window. Times use
+                        your local timezone.
                     </DialogDescription>
                 </DialogHeader>
                 <form onSubmit={submit} className="space-y-4">
@@ -427,15 +466,15 @@ function ScreenCard({
                                         p.pivot?.end_time) && (
                                         <span className="block text-xs text-muted-foreground">
                                             {p.pivot.start_time
-                                                ? new Date(
+                                                ? formatServerUtc(
                                                       p.pivot.start_time,
-                                                  ).toLocaleString()
+                                                  )
                                                 : '…'}
                                             {' → '}
                                             {p.pivot.end_time
-                                                ? new Date(
+                                                ? formatServerUtc(
                                                       p.pivot.end_time,
-                                                  ).toLocaleString()
+                                                  )
                                                 : '…'}
                                         </span>
                                     )}
@@ -457,7 +496,13 @@ function ScreenCard({
                         ))}
                     </ul>
                 )}
-                <AssignPlaylistDialog screen={screen} playlists={playlists} />
+                <div className="flex flex-wrap gap-2">
+                    <MonitorDialog screen={screen} />
+                    <AssignPlaylistDialog
+                        screen={screen}
+                        playlists={playlists}
+                    />
+                </div>
             </CardContent>
         </Card>
     );
@@ -535,10 +580,12 @@ export default function ScreensSection({
     businessId,
     screens,
     playlists,
+    unpairedScreens,
 }: {
     businessId: string;
     screens: Screen[];
     playlists: Playlist[];
+    unpairedScreens: Screen[];
 }) {
     const [query, setQuery] = useState('');
     const filtered = screens.filter((screen) =>
@@ -561,7 +608,10 @@ export default function ScreensSection({
                         className="w-48"
                     />
                     <CreateScreenDialog businessId={businessId} />
-                    <PairScreenDialog businessId={businessId} />
+                    <PairScreenDialog
+                        businessId={businessId}
+                        unpairedScreens={unpairedScreens}
+                    />
                 </div>
             </div>
             {screens.length === 0 ? (

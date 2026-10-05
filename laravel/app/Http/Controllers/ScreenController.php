@@ -56,6 +56,23 @@ class ScreenController extends Controller
         ], 201);
     }
 
+    /**
+     * Screens waiting to be (re-)paired: a live pairing code, whether the
+     * screen is brand new or already owned. Only identifiers are exposed —
+     * never codes or tokens — so one account cannot hijack another
+     * account's TV. The physical code on the TV stays the proof.
+     */
+    public function unpaired()
+    {
+        return response()->json(
+            Screen::whereNotNull('pairing_code')
+                ->where('pairing_code_expires_at', '>', now())
+                ->orderByDesc('updated_at')
+                ->limit(20)
+                ->get()
+        );
+    }
+
     public function show(Screen $screen)
     {
         $user = auth()->user();
@@ -224,7 +241,28 @@ class ScreenController extends Controller
             return response()->json(['message' => 'Device token expired'], 401);
         }
 
+        $request->validate([
+            'video_id' => 'nullable|string|max:255',
+            'position_ms' => 'nullable|integer|min:0',
+            'is_playing' => 'nullable|boolean',
+        ]);
+
         $screen->last_seen_at = now();
+
+        if ($request->filled('video_id')) {
+            $screen->current_video_id = $request->video_id;
+            $screen->current_position_ms = $request->input('position_ms', 0);
+            $screen->position_reported_at = now();
+        }
+
+        if ($request->has('is_playing')) {
+            $screen->is_playing = $request->boolean('is_playing');
+        }
+
+        if ($request->filled('ack_command_id') && ($screen->pending_command['id'] ?? null) === $request->ack_command_id) {
+            $screen->pending_command = null;
+        }
+
         $screen->save();
 
         return response()->json([
@@ -258,6 +296,10 @@ class ScreenController extends Controller
 
         if (! $playlist->business || $playlist->business->user_id !== $user->id) {
             abort(403);
+        }
+
+        if ($playlist->busniss_id !== $screen->busniss_id) {
+            return response()->json(['message' => 'Playlist belongs to a different business'], 422);
         }
 
         if ($screen->screenPlaylists()->where('playlist.id', $playlist->id)->exists()) {
@@ -397,6 +439,69 @@ class ScreenController extends Controller
             'device_token' => $rawToken,
             'expires_in_seconds' => 30 * 24 * 60 * 60,
         ], 200);
+    }
+
+    /**
+     * Queue a remote-control command for the TV: pause, resume, or seek by
+     * a relative number of seconds. Replaces any previous pending command.
+     */
+    public function sendCommand(Request $request, Screen $screen)
+    {
+        $user = auth()->user();
+
+        $this->authorizeScreen($user, $screen);
+
+        $request->validate([
+            'action' => 'required|in:pause,resume,seek_by',
+            'arg' => 'nullable|integer|min:-3600|max:3600',
+        ]);
+
+        if ($request->action === 'seek_by' && ! $request->filled('arg')) {
+            return response()->json(['message' => 'The arg field is required for seek_by.'], 422);
+        }
+
+        $screen->pending_command = [
+            'id' => (string) Str::uuid(),
+            'action' => $request->action,
+            'arg' => $request->arg,
+            'created_at' => now()->toDateTimeString(),
+        ];
+        $screen->save();
+
+        return response()->json(['message' => 'Command queued'], 200);
+    }
+
+    /**
+     * The TV's command inbox. Commands older than two minutes are dropped
+     * so an offline TV never acts on stale input when it returns.
+     */
+    public function deviceCommands(Request $request)
+    {
+        $token = $request->bearerToken() ?: $request->input('device_token');
+
+        if (! $token) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        $screen = Screen::where('device_token', hash('sha256', $token))->first();
+
+        if (! $screen) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        if ($screen->device_token_expires_at && $screen->device_token_expires_at->isPast()) {
+            return response()->json(['message' => 'Device token expired'], 401);
+        }
+
+        $command = $screen->pending_command;
+
+        if (is_array($command) && isset($command['created_at']) && now()->parse($command['created_at'])->addMinutes(2)->isPast()) {
+            $command = null;
+            $screen->pending_command = null;
+            $screen->save();
+        }
+
+        return response()->json(['command' => $command], 200);
     }
 
     /**

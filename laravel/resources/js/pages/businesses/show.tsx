@@ -160,11 +160,13 @@ export default function BusinessShow({
     screens,
     playlists,
     videos,
+    unpairedScreens,
 }: {
     business: Business;
     screens: Screen[];
     playlists: Playlist[];
     videos: Video[];
+    unpairedScreens: Screen[];
 }) {
     const online = screens.filter(
         (s) =>
@@ -278,6 +280,7 @@ export default function BusinessShow({
                         businessId={business.id}
                         screens={screens}
                         playlists={playlists}
+                        unpairedScreens={unpairedScreens}
                     />
                 )}
                 {tab === 'playlists' && (

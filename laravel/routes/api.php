@@ -23,11 +23,17 @@ Route::post('/device/claim', [ScreenController::class, 'claimDevice'])
 Route::get('/device/content', [ScreenController::class, 'deviceContent'])
     ->middleware('throttle:120,1')
     ->name('device.content');
+Route::get('/device/commands', [ScreenController::class, 'deviceCommands'])
+    ->middleware('throttle:120,1')
+    ->name('device.commands');
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/user', function (Request $request) {
         return $request->user();
     });
+
+    Route::get('/screens/unpaired', [ScreenController::class, 'unpaired'])
+        ->name('screens.unpaired');
 
     Route::apiResources([
         'businesses' => BusinessController::class,
@@ -48,6 +54,8 @@ Route::middleware('auth:sanctum')->group(function () {
         ->name('screens.playlists.update');
     Route::delete('/screens/{screen}/playlists', [ScreenController::class, 'detachPlaylist'])
         ->name('screens.playlists.destroy');
+    Route::post('/screens/{screen}/command', [ScreenController::class, 'sendCommand'])
+        ->name('screens.command');
 
     Route::get('/playlists/{playlist}/videos', [PlaylistController::class, 'getVideos'])
         ->name('playlists.videos.index');

@@ -1,4 +1,5 @@
 import { Moon, Sun } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
     Tooltip,
@@ -9,6 +10,18 @@ import { useAppearance } from '@/hooks/use-appearance';
 
 export default function AppearanceToggle() {
     const { resolvedAppearance, updateAppearance } = useAppearance();
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => {
+        setMounted(true);
+    }, []);
+
+    // SSR has no access to the stored theme; rendering the icon only on the
+    // client avoids a hydration mismatch.
+    if (!mounted) {
+        return <span className="h-9 w-9" />;
+    }
+
     const isDark = resolvedAppearance === 'dark';
 
     return (

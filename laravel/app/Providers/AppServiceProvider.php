@@ -3,8 +3,14 @@
 namespace App\Providers;
 
 use Carbon\CarbonImmutable;
+use Illuminate\Auth\Events\Failed;
+use Illuminate\Auth\Events\Login;
+use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Validation\Rules\Password;
 
@@ -24,6 +30,49 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->configureDefaults();
+        $this->logAuthAttempts();
+        $this->expireSessionsOnServerBoot();
+    }
+
+    /**
+     * Temporary login diagnostics (no passwords logged).
+     */
+    protected function logAuthAttempts(): void
+    {
+        Event::listen(Login::class, function (Login $event) {
+            Log::info('Auth login succeeded', ['email' => $event->user->email]);
+        });
+        Event::listen(Failed::class, function (Failed $event) {
+            Log::warning('Auth login failed', [
+                'email' => $event->credentials['email'] ?? null,
+            ]);
+        });
+    }
+
+    /**
+     * Sessions live in the database so they outlive any single process;
+     * wipe them whenever the dev server boots so a reboot always lands on
+     * the login screen. Guarded for clones that haven't migrated yet.
+     */
+    protected function expireSessionsOnServerBoot(): void
+    {
+        if (! $this->app->runningInConsole()) {
+            return;
+        }
+
+        Event::listen(CommandStarting::class, function (CommandStarting $event) {
+            if (! in_array($event->command, ['serve', 'dev'], true)) {
+                return;
+            }
+
+            try {
+                if (Schema::hasTable('sessions')) {
+                    DB::table('sessions')->delete();
+                }
+            } catch (\Throwable $e) {
+                // Never block the server from starting.
+            }
+        });
     }
 
     /**
