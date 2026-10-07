@@ -15,6 +15,7 @@ const ACTION_LABELS: Record<string, string> = {
     'business.updated': 'renamed the business',
     'business.deleted': 'deleted the business',
     'business.member_invited': 'invited a team member',
+    'business.member_created': 'created a team login',
     'business.member_removed': 'removed a team member',
     'screen.created': 'added a screen',
     'screen.updated': 'edited a screen',

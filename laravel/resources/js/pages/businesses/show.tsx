@@ -12,7 +12,6 @@ import {
     ListVideo,
     MonitorPlay,
     Pencil,
-    Trash2,
 } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -38,7 +37,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { dashboard } from '@/routes';
 import { analytics as businessAnalytics } from '@/routes/business';
-import { destroy, update } from '@/routes/businesses';
+import { update } from '@/routes/businesses';
 import { toastApiError } from '@/lib/api-errors';
 import type { Business, Playlist, Screen, Video } from '@/types';
 
@@ -92,40 +91,6 @@ function RenameBusinessDialog({ business }: { business: Business }) {
                 </form>
             </DialogContent>
         </Dialog>
-    );
-}
-
-function DeleteBusinessButton({ business }: { business: Business }) {
-    const { delete: remove, processing } = useHttp();
-
-    function onDelete() {
-        if (
-            !window.confirm(
-                `Delete "${business.name}" and all its screens, playlists and videos?`,
-            )
-        ) {
-            return;
-        }
-        void remove(destroy.url({ business: business.id }), {
-            onSuccess: () => {
-                toast.success('Business deleted');
-                router.visit(dashboard.url());
-            },
-            onError: toastApiError('Could not delete business'),
-        });
-    }
-
-    return (
-        <Button
-            variant="ghost"
-            size="sm"
-            onClick={onDelete}
-            disabled={processing}
-            className="text-muted-foreground hover:text-destructive"
-        >
-            <Trash2 className="size-3.5" />
-            Delete
-        </Button>
     );
 }
 
@@ -258,10 +223,7 @@ export default function BusinessShow({
                             </Link>
                         </Button>
                         {isOwner && (
-                            <>
-                                <RenameBusinessDialog business={business} />
-                                <DeleteBusinessButton business={business} />
-                            </>
+                            <RenameBusinessDialog business={business} />
                         )}
                     </div>
                 </div>

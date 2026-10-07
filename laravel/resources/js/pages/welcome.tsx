@@ -19,7 +19,7 @@ import {
     CardHeader,
     CardTitle,
 } from '@/components/ui/card';
-import { dashboard, login, register } from '@/routes';
+import { dashboard, login } from '@/routes';
 
 const features = [
     {
@@ -114,14 +114,9 @@ function SiteNav({ authenticated }: { authenticated: boolean }) {
                             </Link>
                         </Button>
                     ) : (
-                        <>
-                            <Button variant="ghost" asChild>
-                                <Link href={login()}>Log in</Link>
-                            </Button>
-                            <Button asChild>
-                                <Link href={register()}>Get started</Link>
-                            </Button>
-                        </>
+                        <Button asChild>
+                            <Link href={login()}>Log in</Link>
+                        </Button>
                     )}
                 </div>
             </nav>
@@ -146,8 +141,8 @@ function Hero({ authenticated }: { authenticated: boolean }) {
                 </p>
                 <div className="flex flex-wrap gap-3">
                     <Button size="lg" asChild>
-                        <Link href={authenticated ? dashboard() : register()}>
-                            {authenticated ? 'Open dashboard' : 'Start free'}
+                        <Link href={authenticated ? dashboard() : login()}>
+                            {authenticated ? 'Open dashboard' : 'Log in'}
                             <ArrowRight className="size-4" />
                         </Link>
                     </Button>
@@ -304,14 +299,12 @@ function Cta({ authenticated }: { authenticated: boolean }) {
                         Put your screens to work today
                     </h2>
                     <p className="text-muted-foreground">
-                        Create an account, add your business, and pair your
-                        first TV before lunch.
+                        Log in, open your venue, and pair your first TV before
+                        lunch.
                     </p>
                     <Button size="lg" asChild>
-                        <Link href={authenticated ? dashboard() : register()}>
-                            {authenticated
-                                ? 'Open dashboard'
-                                : 'Create free account'}
+                        <Link href={authenticated ? dashboard() : login()}>
+                            {authenticated ? 'Open dashboard' : 'Log in'}
                             <ArrowRight className="size-4" />
                         </Link>
                     </Button>

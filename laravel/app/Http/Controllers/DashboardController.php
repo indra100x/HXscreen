@@ -7,6 +7,7 @@ use App\Models\Business;
 use App\Models\PlaybackStat;
 use App\Models\Screen;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
@@ -14,24 +15,18 @@ use Inertia\Response;
 
 class DashboardController extends Controller
 {
-    public function index(Request $request): Response
+    public function index(Request $request): Response|RedirectResponse
     {
         $user = $request->user();
-        $ids = $user->accessibleBusinessIds();
 
-        $businesses = Business::whereIn('id', $ids)
-            ->withCount(['screens', 'playlists', 'videos'])
-            ->orderBy('name')
-            ->get()
-            ->map(fn (Business $business) => [
-                ...$business->toArray(),
-                'role' => $business->isOwnedBy($user) ? 'owner' : 'member',
-            ]);
+        $business = $user->businesses()->orderBy('name')->first()
+            ?? $user->memberBusinesses()->orderBy('name')->first();
 
-        return Inertia::render('dashboard', [
-            'businesses' => $businesses,
-            'unpairedScreens' => $this->unpairedScreens(),
-        ]);
+        if (! $business) {
+            return Inertia::render('setup');
+        }
+
+        return redirect()->route('business.show', $business);
     }
 
     public function show(Request $request, Business $business): Response

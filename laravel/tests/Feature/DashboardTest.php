@@ -11,12 +11,21 @@ test('guests are redirected to the login page', function () {
     $response->assertRedirect(route('login'));
 });
 
-test('authenticated users can visit the dashboard', function () {
+test('users without a venue see the setup page', function () {
     $user = User::factory()->create();
     $this->actingAs($user);
 
     $response = $this->get(route('dashboard'));
     $response->assertOk();
+});
+
+test('users with a venue are taken straight to it', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+    $this->actingAs($user);
+
+    $response = $this->get(route('dashboard'));
+    $response->assertRedirect(route('business.show', $business));
 });
 
 test('owners can visit their business page', function () {
@@ -36,21 +45,6 @@ test('users cannot visit another user’s business page', function () {
 
     $response = $this->get(route('business.show', $business));
     $response->assertForbidden();
-});
-
-test('a session-authenticated browser can write to the api like the dashboard does', function () {
-    $user = User::factory()->create();
-
-    $this->post(route('login.store'), [
-        'email' => $user->email,
-        'password' => 'password',
-    ]);
-    $this->assertAuthenticated();
-
-    $response = $this->withHeader('Referer', 'http://127.0.0.1:8000/dashboard')
-        ->postJson('/api/businesses', ['name' => 'Acme']);
-
-    $response->assertCreated();
 });
 
 test('owners see their business analytics but not others’', function () {
@@ -81,4 +75,19 @@ test('owners see their business analytics but not others’', function () {
         ->has('perScreen', 1)
         ->has('perVideo', 1)
     );
+});
+
+test('a session-authenticated browser can write to the api like the dashboard does', function () {
+    $user = User::factory()->create();
+
+    $this->post(route('login.store'), [
+        'email' => $user->email,
+        'password' => 'password',
+    ]);
+    $this->assertAuthenticated();
+
+    $response = $this->withHeader('Referer', 'http://127.0.0.1:8000/dashboard')
+        ->postJson('/api/businesses', ['name' => 'Acme']);
+
+    $response->assertCreated();
 });

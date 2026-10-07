@@ -7,6 +7,7 @@ use App\Models\Business;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rules\Password;
 
 class BusinessController extends Controller
 {
@@ -26,6 +27,13 @@ class BusinessController extends Controller
     public function store(Request $request)
     {
         $user = $request->user();
+
+        // Single-business package: one venue per account. The owner's venue
+        // is normally seeded at install (app:ensure-owner); this guard stops
+        // extra venues being created through the setup screen or API.
+        if ($user->businesses()->exists() || $user->memberBusinesses()->exists()) {
+            return response()->json(['message' => 'This panel manages a single venue.'], 422);
+        }
 
         $request->validate([
             'name' => 'required|string|max:50',
@@ -109,10 +117,32 @@ class BusinessController extends Controller
         $this->ensureBusinessOwner($user, $business);
 
         $request->validate([
-            'email' => 'required|email|exists:users,email',
+            'email' => 'required|email|max:255',
         ]);
 
-        $member = User::where('email', $request->email)->firstOrFail();
+        $member = User::where('email', $request->email)->first();
+
+        // New address: the owner creates the teammate's login on the spot
+        // (there is no public registration in the single-business package).
+        if (! $member) {
+            $request->validate([
+                'name' => 'required|string|max:255',
+                'password' => ['required', 'string', Password::default(), 'confirmed'],
+            ]);
+
+            $member = User::create([
+                'name' => $request->name,
+                'email' => $request->email,
+                'password' => $request->password,
+            ]);
+            $member->forceFill(['email_verified_at' => now()])->save();
+
+            $business->members()->attach($member->id, ['id' => (string) Str::uuid()]);
+
+            AuditLog::record($user, 'business.member_created', $business->id, $member, [], $request->ip());
+
+            return response()->json(['message' => 'Member account created', 'member' => $member->only(['id', 'name', 'email'])], 201);
+        }
 
         if ($business->isOwnedBy($member)) {
             return response()->json(['message' => 'User already owns this business'], 422);

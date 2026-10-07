@@ -10,6 +10,12 @@ fi
 
 touch database/database.sqlite
 php artisan migrate --force
+# Install-time owner login (single-business package). Idempotent: creates or
+# updates OWNER_EMAIL with OWNER_PASSWORD and ensures its venue exists.
+# Skipped silently when OWNER_EMAIL/OWNER_PASSWORD are not set (local dev).
+if [ -n "$OWNER_EMAIL" ] && [ -n "$OWNER_PASSWORD" ]; then
+    php artisan app:ensure-owner --force || echo "WARNING: app:ensure-owner failed (login may not work)"
+fi
 php artisan storage:link || true
 php artisan optimize
 chown -R www-data:www-data storage bootstrap/cache database

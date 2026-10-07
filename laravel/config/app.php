@@ -17,6 +17,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Install-time owner account (single-business resell package)
+    |--------------------------------------------------------------------------
+    |
+    | Set via OWNER_* env vars at installation. The entrypoint runs
+    | `php artisan app:ensure-owner` on every boot (idempotent) so the
+    | customer always has a working login without public registration.
+    |
+    */
+
+    'owner_name' => env('OWNER_NAME'),
+    'owner_email' => env('OWNER_EMAIL'),
+    'owner_password' => env('OWNER_PASSWORD'),
+    'owner_business' => env('BUSINESS_NAME'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application Environment
     |--------------------------------------------------------------------------
     |

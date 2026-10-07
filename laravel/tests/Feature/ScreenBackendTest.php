@@ -602,7 +602,7 @@ it('lets owners manage team members but nobody else', function () {
     $stranger = User::factory()->create();
     $business = Business::create(['user_id' => $owner->id, 'name' => 'Acme']);
 
-    // Unknown email and non-owners are rejected.
+    // Creating without credentials is rejected, non-owners are rejected.
     $this->actingAs($owner, 'sanctum')
         ->postJson("/api/businesses/{$business->id}/members", ['email' => 'ghost@example.com'])
         ->assertStatus(422);
@@ -611,7 +611,25 @@ it('lets owners manage team members but nobody else', function () {
         ->postJson("/api/businesses/{$business->id}/members", ['email' => $member->email])
         ->assertForbidden();
 
-    // Invite works once, then conflicts.
+    // Owner creates a login for a new address, then attaching it again conflicts.
+    $this->actingAs($owner, 'sanctum')
+        ->postJson("/api/businesses/{$business->id}/members", [
+            'name' => 'New Teammate',
+            'email' => 'newbie@example.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+        ])
+        ->assertCreated();
+
+    $newbie = User::where('email', 'newbie@example.com')->firstOrFail();
+    expect($newbie->email_verified_at)->not->toBeNull();
+    expect($business->members()->where('users.id', $newbie->id)->exists())->toBeTrue();
+
+    $this->actingAs($owner, 'sanctum')
+        ->postJson("/api/businesses/{$business->id}/members", ['email' => 'newbie@example.com'])
+        ->assertStatus(409);
+
+    // Attaching an existing account still works once, then conflicts.
     $this->actingAs($owner, 'sanctum')
         ->postJson("/api/businesses/{$business->id}/members", ['email' => $member->email])
         ->assertOk();
