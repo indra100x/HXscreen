@@ -1,5 +1,5 @@
 import { Link, usePage } from '@inertiajs/react';
-import { Building2, HardDrive, LayoutGrid, MonitorPlay } from 'lucide-react';
+import { Building2, LayoutGrid } from 'lucide-react';
 import AppLogo from '@/components/app-logo';
 import { NavMain } from '@/components/nav-main';
 import { NavUser } from '@/components/nav-user';
@@ -14,8 +14,7 @@ import {
     SidebarMenuButton,
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
-import { dashboard, storage } from '@/routes';
-import { overview as screensOverview } from '@/routes/screens';
+import { dashboard } from '@/routes';
 import { show as businessShow } from '@/routes/business';
 import type { NavItem } from '@/types';
 
@@ -24,16 +23,6 @@ const mainNavItems: NavItem[] = [
         title: 'Dashboard',
         href: dashboard(),
         icon: LayoutGrid,
-    },
-    {
-        title: 'Screens',
-        href: screensOverview(),
-        icon: MonitorPlay,
-    },
-    {
-        title: 'Storage',
-        href: storage(),
-        icon: HardDrive,
     },
 ];
 

@@ -114,39 +114,6 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function screens(Request $request): Response
-    {
-        $screens = Screen::whereIn('busniss_id', $request->user()->accessibleBusinessIds())
-            ->with(['business:id,name'])
-            ->orderBy('name')
-            ->get();
-
-        return Inertia::render('screens/overview', [
-            'screens' => $screens,
-        ]);
-    }
-
-    public function storage(Request $request): Response
-    {
-        $ids = $request->user()->accessibleBusinessIds();
-
-        $businesses = Business::whereIn('id', $ids)
-            ->orderBy('name')
-            ->get()
-            ->map(fn (Business $business) => [
-                'id' => $business->id,
-                'name' => $business->name,
-                'videos_count' => $business->videos()->count(),
-                'bytes' => (int) $business->videos()->sum('size'),
-            ]);
-
-        return Inertia::render('storage/overview', [
-            'businesses' => $businesses,
-            'totalBytes' => $businesses->sum('bytes'),
-            'totalVideos' => $businesses->sum('videos_count'),
-        ]);
-    }
-
     /**
      * @return Collection<int, Screen>
      */
