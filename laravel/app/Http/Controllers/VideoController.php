@@ -2,8 +2,9 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Business;
+use App\Models\AuditLog;
 use App\Models\Video;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -11,9 +12,11 @@ use Illuminate\Support\Str;
 
 class VideoController extends Controller
 {
-    protected string $disk = 'public';
+    protected string $disk = 'r2';
 
-    public function index(Request $request)
+    private const VIDEO_FILE_RULE = 'file|mimetypes:video/mp4,video/quicktime,video/x-msvideo,video/webm|max:102400';
+
+    public function index(Request $request): JsonResponse
     {
         $user = $request->user();
 
@@ -22,13 +25,13 @@ class VideoController extends Controller
             'route' => $request->route()?->getName(),
         ]);
 
-        $businesses = $user->businesses()->pluck('id')->toArray();
+        $businesses = $this->accessibleBusinessIds($user);
         $videos = Video::whereIn('busniss_id', $businesses)->get();
 
         return response()->json($videos);
     }
 
-    public function store(Request $request)
+    public function store(Request $request): JsonResponse
     {
         $user = $request->user();
 
@@ -38,12 +41,12 @@ class VideoController extends Controller
         ]);
 
         $request->validate([
-            'video' => 'required|file|mimetypes:video/mp4,video/quicktime,video/x-msvideo,video/webm|max:102400',
+            'video' => 'required|'.self::VIDEO_FILE_RULE,
             'busniss_id' => 'required|exists:busniss,id',
             'name' => 'nullable|string|max:255',
         ]);
 
-        $this->ensureBusinessOwned($user, $request->busniss_id);
+        $this->ensureBusinessAccess($user, $request->busniss_id);
 
         $file = $request->file('video');
         $filename = (string) Str::uuid().'_'.$file->getClientOriginalName();
@@ -51,18 +54,22 @@ class VideoController extends Controller
 
         $video = Video::create([
             'busniss_id' => $request->busniss_id,
+            'disk' => $this->disk,
             'name' => $request->name ?? $file->getClientOriginalName(),
             'url' => $path,
+            'size' => $file->getSize(),
         ]);
+
+        AuditLog::record($user, 'video.created', $video->busniss_id, $video, [], $request->ip());
 
         return response()->json([
             'message' => 'Video stored successfully',
             'video' => $video,
-            'url' => Storage::disk($this->disk)->url($path),
+            'url' => $video->media_url,
         ], 201);
     }
 
-    public function show(Video $video)
+    public function show(Video $video): JsonResponse
     {
         $user = auth()->user();
 
@@ -76,7 +83,7 @@ class VideoController extends Controller
         return response()->json(['video' => $video]);
     }
 
-    public function destroy(Video $video)
+    public function destroy(Video $video): JsonResponse
     {
         $user = auth()->user();
 
@@ -87,16 +94,16 @@ class VideoController extends Controller
 
         $this->authorizeVideo($user, $video);
 
-        if ($video->url && Storage::disk($this->disk)->exists($video->url)) {
-            Storage::disk($this->disk)->delete($video->url);
-        }
+        $this->deleteStoredFile($video);
 
         $video->delete();
+
+        AuditLog::record($user, 'video.deleted', $video->busniss_id, $video);
 
         return response()->json(['message' => 'Video deleted successfully'], 200);
     }
 
-    public function update(Request $request, Video $video)
+    public function update(Request $request, Video $video): JsonResponse
     {
         $user = auth()->user();
 
@@ -114,7 +121,7 @@ class VideoController extends Controller
         ];
 
         if ($request->hasFile('video')) {
-            $rules['video'] = 'required|file|mimetypes:video/mp4,video/quicktime,video/x-msvideo,video/webm|max:102400';
+            $rules['video'] = 'required|'.self::VIDEO_FILE_RULE;
         }
 
         $request->validate($rules);
@@ -126,18 +133,18 @@ class VideoController extends Controller
         }
 
         if ($request->filled('busniss_id')) {
-            $this->ensureBusinessOwned($user, $request->busniss_id);
+            $this->ensureBusinessAccess($user, $request->busniss_id);
             $data['busniss_id'] = $request->busniss_id;
         }
 
         if ($request->hasFile('video')) {
-            if ($video->url && Storage::disk($this->disk)->exists($video->url)) {
-                Storage::disk($this->disk)->delete($video->url);
-            }
+            $this->deleteStoredFile($video);
 
             $file = $request->file('video');
             $filename = (string) Str::uuid().'_'.$file->getClientOriginalName();
             $data['url'] = $file->storeAs('videos', $filename, $this->disk);
+            $data['disk'] = $this->disk;
+            $data['size'] = $file->getSize();
 
             if (! isset($data['name'])) {
                 $data['name'] = $file->getClientOriginalName();
@@ -146,29 +153,27 @@ class VideoController extends Controller
 
         $video->update($data);
 
+        AuditLog::record($user, 'video.updated', $video->busniss_id, $video, [], $request->ip());
+
         return response()->json([
             'message' => 'Video updated successfully',
             'video' => $video,
         ], 200);
     }
 
-    protected function authorizeVideo($user, Video $video): void
+    protected function deleteStoredFile(Video $video): void
     {
-        if (! $video->business) {
-            abort(404);
-        }
+        $disk = (string) $video->disk;
 
-        if ($video->business->user_id !== $user->id) {
-            abort(403);
+        if ($video->url && Storage::disk($disk)->exists($video->url)) {
+            Storage::disk($disk)->delete($video->url);
         }
     }
 
-    protected function ensureBusinessOwned($user, string $businessId): void
+    protected function authorizeVideo($user, Video $video): void
     {
-        $business = Business::findOrFail($businessId);
-
-        if ($business->user_id !== $user->id) {
-            abort(403);
+        if (! $video->business || ! $video->business->isAccessibleBy($user)) {
+            abort($video->business ? 403 : 404);
         }
     }
 }

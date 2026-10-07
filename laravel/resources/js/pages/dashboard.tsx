@@ -11,6 +11,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
     Card,
@@ -148,8 +149,11 @@ function BusinessCard({ business }: { business: Business }) {
                             <Building2 className="size-5" />
                         </span>
                         <div>
-                            <CardTitle className="leading-tight">
+                            <CardTitle className="flex items-center gap-2 leading-tight">
                                 {business.name}
+                                {business.role === 'member' && (
+                                    <Badge variant="secondary">Member</Badge>
+                                )}
                             </CardTitle>
                             <CardDescription>
                                 Updated{' '}
@@ -165,6 +169,7 @@ function BusinessCard({ business }: { business: Business }) {
                         onClick={onDelete}
                         disabled={processing}
                         className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive"
+                        hidden={business.role !== 'owner'}
                     >
                         Delete
                     </Button>

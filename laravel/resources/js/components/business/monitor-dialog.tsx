@@ -19,6 +19,7 @@ import { command as sendCommand, show as showScreen } from '@/routes/screens';
 import type { Screen, Video } from '@/types';
 
 const STALE_AFTER_MS = 2 * 60 * 1000;
+const LIVE_POLL_MS = 10_000;
 
 function orderedVideos(screen: Screen): Video[] {
     return (screen.screen_playlists ?? []).flatMap((p) => p.videos ?? []);
@@ -64,37 +65,139 @@ export default function MonitorDialog({ screen }: { screen: Screen }) {
     const [index, setIndex] = useState(0);
     const [clock, setClock] = useState(0);
     const [tvPaused, setTvPaused] = useState(false);
+    const [syncNote, setSyncNote] = useState<string | null>(null);
+    const [diag, setDiag] = useState('—');
     const videoRef = useRef<HTMLVideoElement>(null);
     const seekTo = useRef(0);
 
+    // React does not reliably set the muted *property* before autoplay is
+    // evaluated, and Firefox then blocks autoplay. Force it imperatively.
+    const setVideoRef = (element: HTMLVideoElement | null) => {
+        videoRef.current = element;
+        if (element) {
+            element.muted = true;
+            element.defaultMuted = true;
+        }
+    };
+
+    const {
+        post: send,
+        transform,
+        processing: commanding,
+    } = useHttp({ action: '', arg: 0 });
+
+    // Plain fetch for the screen state: useHttp's GET response shape isn't
+    // the raw JSON, and its transform would leak POST fields into the query.
+    async function fetchLiveScreen(): Promise<Screen | null> {
+        try {
+            const res = await window.fetch(
+                showScreen.url({ screen: screen.id }),
+                {
+                    headers: {
+                        Accept: 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                    credentials: 'same-origin',
+                },
+            );
+            if (!res.ok) {
+                return null;
+            }
+            const data = (await res.json()) as { screen?: Screen };
+            return data.screen ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    // The dialog tracks the TV itself, not the (up to 30s stale) page
+    // props: pull fresh state on open and every 10s while open.
+    const [liveScreen, setLiveScreen] = useState(screen);
+
+    // Page props also refresh in the background, but they can be older
+    // than the interval state — only accept them when newer, otherwise a
+    // stale poll would un-pause a paused preview.
+    useEffect(() => {
+        setLiveScreen((prev) => {
+            const prevAt =
+                parseServerUtc(prev.position_reported_at)?.getTime() ?? 0;
+            const nextAt =
+                parseServerUtc(screen.position_reported_at)?.getTime() ?? 0;
+            return nextAt >= prevAt ? screen : prev;
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [screen]);
+
+    useEffect(() => {
+        if (!open) {
+            return;
+        }
+        let cancelled = false;
+        const pull = () => {
+            void fetchLiveScreen().then((next) => {
+                if (next && !cancelled) {
+                    setLiveScreen(next);
+                }
+            });
+        };
+        pull();
+        const timer = window.setInterval(pull, LIVE_POLL_MS);
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open]);
+
     const videos = orderedVideos(screen);
-    const reportedAt = parseServerUtc(screen.position_reported_at);
+    const reportedAt = parseServerUtc(liveScreen.position_reported_at);
     const fresh =
         reportedAt != null &&
         Date.now() - reportedAt.getTime() < STALE_AFTER_MS;
 
-    // Mirror the TV's own play state in the preview.
+    // Mirror the TV's own play state in the preview. Pausing is trusted
+    // outright; resuming requires proof (a new video, or a position that
+    // actually advanced), so a stale or glitchy `true` flag can never
+    // restart a paused preview by itself.
+    const lastSeen = useRef<{ videoId: string | null; ms: number } | null>(
+        null,
+    );
+
     useEffect(() => {
         const video = videoRef.current;
         if (!video || !open) {
             return;
         }
-        if (screen.is_playing === false && !video.paused) {
-            video.pause();
-        } else if (screen.is_playing === true && video.paused) {
-            void video.play().catch(() => {});
+        const vid = liveScreen.current_video_id;
+        const ms = liveScreen.current_position_ms ?? 0;
+        const prev = lastSeen.current;
+        lastSeen.current = { videoId: vid, ms };
+
+        if (liveScreen.is_playing === false) {
+            if (!video.paused) {
+                video.pause();
+            }
+            return;
+        }
+        if (liveScreen.is_playing === true) {
+            const switched = !prev || prev.videoId !== vid;
+            const advanced =
+                !!prev && prev.videoId === vid && ms > prev.ms + 2000;
+            if ((switched || advanced) && video.paused) {
+                void video.play().catch(() => {});
+            }
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [screen.is_playing, screen.position_reported_at]);
+    }, [liveScreen.is_playing, liveScreen.position_reported_at]);
 
-    // Props refresh every 30s via page polling: if the TV has moved on
-    // (different video, or drift beyond a few seconds), pull the preview
-    // back to it. Small drifts are left alone to avoid visible jumps.
+    // If the TV has moved on (different video, or drift beyond a few
+    // seconds), pull the preview back to it. Small drifts are left alone
+    // to avoid visible jumps.
     useEffect(() => {
         if (!open || videos.length === 0) {
             return;
         }
-        const live = liveState(screen, videos);
+        const live = liveState(liveScreen, videos);
         const target = Math.min(live.index, videos.length - 1);
         const video = videoRef.current;
         if (target !== index) {
@@ -110,14 +213,7 @@ export default function MonitorDialog({ screen }: { screen: Screen }) {
             video.currentTime = live.at;
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [screen.position_reported_at]);
-
-    const {
-        post: send,
-        get: fetch,
-        transform,
-        processing: commanding,
-    } = useHttp({ action: '', arg: 0 });
+    }, [liveScreen.position_reported_at]);
 
     function remote(action: RemoteAction, arg: number, doneMessage: string) {
         transform(() => ({ action, arg }));
@@ -130,42 +226,76 @@ export default function MonitorDialog({ screen }: { screen: Screen }) {
                 if (action === 'resume') {
                     setTvPaused(false);
                 }
+                if (action === 'seek_by') {
+                    // Move the preview instantly; the TV confirms via
+                    // its next heartbeat and the follow effect.
+                    const video = videoRef.current;
+                    if (video && video.readyState >= 1) {
+                        video.currentTime = Math.max(
+                            0,
+                            video.currentTime + arg,
+                        );
+                    }
+                }
             },
             onError: toastApiError('Command failed'),
         });
     }
 
-    /** Seek the preview to the given video/offset, remounting if needed. */
-    const indexRef = useRef(index);
-    indexRef.current = index;
-
-    function goTo(index: number, at: number) {
-        seekTo.current = at;
-        const video = videoRef.current;
-        if (index !== indexRef.current) {
-            setIndex(index);
-        } else if (video && video.readyState >= 1) {
-            video.currentTime = at;
-        }
-    }
-
-    function applyLiveState(liveScreen: Screen) {
-        const live = liveState(liveScreen, videos);
-        goTo(Math.min(live.index, Math.max(0, videos.length - 1)), live.at);
-    }
-
-    // Pull the TV's current state on demand (props can lag ~30s behind),
-    // then land the preview on it.
+    // Pull the TV's current state on demand and apply it straight to
+    // the element: switch video if needed, seek to the live frame, and
+    // match the TV's play state. Imperative on purpose — the passive
+    // mirror/follow effects skip paused elements and unchanged data,
+    // which is exactly when an explicit re-sync must still act.
+    // Always reports the outcome so the button never feels dead.
     function syncToLive() {
-        void fetch(showScreen.url({ screen: screen.id }), {
-            onSuccess: (response) => {
-                const liveScreen = (response as unknown as { screen: Screen })
-                    .screen;
-                if (liveScreen) {
-                    applyLiveState(liveScreen);
+        setSyncNote('Syncing…');
+        void fetchLiveScreen().then((next) => {
+            if (!next) {
+                setSyncNote('Sync failed — no response from server.');
+                toast.error('Could not re-sync');
+                return;
+            }
+            const live = liveState(next, videos);
+            const target = Math.min(live.index, Math.max(0, videos.length - 1));
+            const video = videoRef.current;
+            const sameVideo = videos[target]?.id === videos[index]?.id;
+            const drift =
+                sameVideo && video ? live.at - video.currentTime : null;
+            setLiveScreen(next);
+            if (!sameVideo) {
+                seekTo.current = live.at;
+                setIndex(target);
+                setSyncNote('Synced to live.');
+                toast.success('Re-synced to live');
+                return;
+            }
+            if (video) {
+                try {
+                    if (video.readyState >= 1) {
+                        video.currentTime = live.at;
+                    } else {
+                        seekTo.current = live.at;
+                    }
+                } catch {
+                    seekTo.current = live.at;
                 }
-            },
-            onError: toastApiError('Could not re-sync'),
+                if (next.is_playing === false && !video.paused) {
+                    video.pause();
+                } else if (next.is_playing === true && video.paused) {
+                    void video.play().catch(() => {});
+                }
+            }
+            if (drift !== null && Math.abs(drift) > 2) {
+                const seconds = Math.round(drift);
+                setSyncNote(`Synced (${seconds > 0 ? '+' : ''}${seconds}s).`);
+                toast.success(
+                    `Re-synced (${seconds > 0 ? '+' : ''}${seconds}s)`,
+                );
+            } else {
+                setSyncNote('Already in sync.');
+                toast.success('Already in sync');
+            }
         });
     }
 
@@ -181,9 +311,38 @@ export default function MonitorDialog({ screen }: { screen: Screen }) {
         if (!video) {
             return;
         }
-        const onTime = () => setClock(video.currentTime);
+        const report = () => {
+            const err = video.error ? `err=${video.error.code}` : 'err=none';
+            setDiag(
+                `ready=${video.readyState} net=${video.networkState} paused=${video.paused} muted=${video.muted} ${err} src=${video.currentSrc.slice(-40)}`,
+            );
+        };
+        const onTime = () => {
+            setClock(video.currentTime);
+            report();
+        };
+        const onEvent = () => report();
+        const mediaEvents = [
+            'play',
+            'pause',
+            'error',
+            'stalled',
+            'waiting',
+            'canplay',
+        ] as const;
         video.addEventListener('timeupdate', onTime);
-        return () => video.removeEventListener('timeupdate', onTime);
+        for (const name of mediaEvents) {
+            video.addEventListener(name, onEvent);
+        }
+        report();
+        const timer = window.setInterval(report, 2000);
+        return () => {
+            window.clearInterval(timer);
+            video.removeEventListener('timeupdate', onTime);
+            for (const name of mediaEvents) {
+                video.removeEventListener(name, onEvent);
+            }
+        };
     }, [index, open]);
 
     const current = videos[index];
@@ -200,7 +359,7 @@ export default function MonitorDialog({ screen }: { screen: Screen }) {
                 <DialogHeader>
                     <DialogTitle className="flex items-center gap-2">
                         {screen.name}
-                        {screen.is_playing === false ? (
+                        {liveScreen.is_playing === false ? (
                             <Badge variant="secondary">TV paused</Badge>
                         ) : fresh ? (
                             <Badge>
@@ -228,13 +387,24 @@ export default function MonitorDialog({ screen }: { screen: Screen }) {
                     <div className="space-y-3">
                         <video
                             key={`${current.id}-${index}`}
-                            ref={videoRef}
+                            ref={setVideoRef}
                             className="aspect-video w-full rounded-md bg-black"
-                            src={publicFileUrl(current.url)}
+                            src={
+                                current.media_url ?? publicFileUrl(current.url)
+                            }
                             muted
                             autoPlay
+                            playsInline
                             onLoadedMetadata={(e) => {
                                 e.currentTarget.currentTime = seekTo.current;
+                            }}
+                            onCanPlay={(e) => {
+                                // Autoplay only when the TV itself is
+                                // playing — otherwise every seek would
+                                // restart a paused preview.
+                                if (liveScreen.is_playing !== false) {
+                                    e.currentTarget.play().catch(() => {});
+                                }
                             }}
                             onEnded={() => {
                                 // Advance locally through the playlist loop.
@@ -290,6 +460,12 @@ export default function MonitorDialog({ screen }: { screen: Screen }) {
                                 {formatTime(clock)} ·{' '}
                                 {current.name ?? current.url}
                             </span>
+                            <span
+                                className="w-full font-mono text-[11px] text-muted-foreground"
+                                title="Debug: element state"
+                            >
+                                {diag}
+                            </span>
                             <Button
                                 variant="ghost"
                                 size="sm"
@@ -300,6 +476,11 @@ export default function MonitorDialog({ screen }: { screen: Screen }) {
                                 Re-sync to live
                             </Button>
                         </div>
+                        {syncNote && (
+                            <p className="text-xs text-muted-foreground">
+                                {syncNote}
+                            </p>
+                        )}
                     </div>
                 )}
             </DialogContent>

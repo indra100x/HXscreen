@@ -25,6 +25,13 @@ return Application::configure(basePath: dirname(__DIR__))
             EnsureFrontendRequestsAreStateful::class,
         ]);
 
+        // Baseline abuse protection for every API route. Sensitive routes
+        // carry stricter limits of their own; /media is exempt because
+        // players fetch per range chunk behind NATed IPs.
+        $middleware->api(append: [
+            'throttle:api',
+        ]);
+
         $middleware->web(append: [
             HandleAppearance::class,
             HandleInertiaRequests::class,

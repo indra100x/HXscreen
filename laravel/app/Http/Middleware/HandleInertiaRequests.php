@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Models\Business;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -42,7 +43,7 @@ class HandleInertiaRequests extends Middleware
                 'user' => $request->user(),
             ],
             'businesses' => $request->user()
-                ? $request->user()->businesses()->orderBy('name')->get(['id', 'name'])
+                ? Business::whereIn('id', $request->user()->accessibleBusinessIds())->orderBy('name')->get(['id', 'name'])
                 : [],
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];

@@ -1,6 +1,7 @@
 package com.hxscreen.tv
 
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import com.hxscreen.tv.data.HxApi
 import com.hxscreen.tv.data.TokenStore
+import com.hxscreen.tv.ui.ControlsBus
 import com.hxscreen.tv.ui.PairingScreen
 import com.hxscreen.tv.ui.PlayerScreen
 
@@ -25,6 +27,23 @@ private sealed interface UiScreen {
 }
 
 class MainActivity : ComponentActivity() {
+
+    private val controlsBus = ControlsBus()
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // Intercepted here (not in Compose) so a focused video surface
+        // can never swallow the remote's OK key.
+        if (
+            event?.action == KeyEvent.ACTION_DOWN &&
+            (keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                keyCode == KeyEvent.KEYCODE_ENTER ||
+                keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) &&
+            controlsBus.onOk?.invoke() == true
+        ) {
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,6 +81,8 @@ class MainActivity : ComponentActivity() {
                             api = api,
                             token = current.token,
                             tokenSavedAt = store.tokenSavedAt,
+                            store = store,
+                            controlsBus = controlsBus,
                             onTokenRefreshed = { store.saveToken(it) },
                             onUnpaired = {
                                 store.clear()

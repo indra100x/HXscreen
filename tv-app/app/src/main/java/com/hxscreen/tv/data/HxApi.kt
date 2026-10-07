@@ -6,6 +6,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -30,6 +31,7 @@ data class ContentFeed(
     val screenId: String,
     val screenName: String,
     val playlists: List<AssignedPlaylist>,
+    val playbackMode: String,
 ) {
     /** Flat video list in play order. */
     val videos: List<PlaylistVideo>
@@ -124,7 +126,8 @@ class HxApi(private val baseUrl: String) {
     }
 
     /** Resolve a stored video path to a playable URL. */
-    fun videoUrl(path: String): String {        if (path.startsWith("http://") || path.startsWith("https://")) {
+    fun videoUrl(path: String): String {
+        if (path.startsWith("http://") || path.startsWith("https://")) {
             return path
         }
         return baseUrl.trimEnd('/') + "/storage/" + path.trimStart('/')
@@ -158,34 +161,37 @@ class HxApi(private val baseUrl: String) {
     suspend fun content(token: String): ContentFeed = withContext(Dispatchers.IO) {
         val json = get("/api/device/content?device_token=$token", token)
         val screen = json.getJSONObject("screen")
+        val array = json.optJSONArray("playlists") ?: JSONArray()
         val playlists = mutableListOf<AssignedPlaylist>()
-        val array = json.optJSONArray("playlists")
-        if (array != null) {
-            for (i in 0 until array.length()) {
-                val p = array.getJSONObject(i)
-                val pivot = p.optJSONObject("pivot")
-                val videos = mutableListOf<PlaylistVideo>()
-                val items = p.optJSONArray("videos")
-                if (items != null) {
-                    for (j in 0 until items.length()) {
-                        val v = items.getJSONObject(j)
-                        videos += PlaylistVideo(
-                            v.getString("id"),
-                            v.optString("name").ifEmpty { null },
-                            videoUrl(v.getString("url")),
-                        )
-                    }
-                }
-                playlists += AssignedPlaylist(
-                    p.getString("id"),
-                    p.optString("name", ""),
-                    videos,
-                    parseServerTime(pivot?.optString("start_time")),
-                    parseServerTime(pivot?.optString("end_time")),
+        for (i in 0 until array.length()) {
+            val p = array.getJSONObject(i)
+            val pivot = p.optJSONObject("pivot")
+            val items = p.optJSONArray("videos") ?: JSONArray()
+            val videos = mutableListOf<PlaylistVideo>()
+            for (j in 0 until items.length()) {
+                val v = items.getJSONObject(j)
+                val path = v.getString("url")
+                videos += PlaylistVideo(
+                    v.getString("id"),
+                    v.optString("name").ifEmpty { null },
+                    v.optString("media_url").ifEmpty { null }
+                        ?: videoUrl(path),
                 )
             }
+            playlists += AssignedPlaylist(
+                p.getString("id"),
+                p.optString("name", ""),
+                videos,
+                parseServerTime(pivot?.optString("start_time")),
+                parseServerTime(pivot?.optString("end_time")),
+            )
         }
-        ContentFeed(screen.getString("id"), screen.optString("name", ""), playlists)
+        ContentFeed(
+            screen.getString("id"),
+            screen.optString("name", ""),
+            playlists,
+            screen.optString("playback_mode", "loop").ifEmpty { "loop" },
+        )
     }
 
     suspend fun heartbeat(

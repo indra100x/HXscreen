@@ -169,7 +169,7 @@ function VideoCard({ video }: { video: Video }) {
                     className="aspect-video w-full rounded-md bg-black"
                     controls
                     preload="metadata"
-                    src={publicFileUrl(video.url)}
+                    src={video.media_url ?? publicFileUrl(video.url)}
                 />
                 <div className="text-sm text-muted-foreground">
                     Uploaded {new Date(video.created_at).toLocaleDateString()}

@@ -26,6 +26,7 @@ class Screen extends Model
         'current_video_id',
         'current_position_ms',
         'position_reported_at',
+        'playback_mode',
     ];
 
     protected $casts = [

@@ -365,6 +365,48 @@ function EditScheduleDialog({
     );
 }
 
+function PlaybackModeToggle({ screen }: { screen: Screen }) {
+    const { put, transform, processing } = useHttp({ playback_mode: '' });
+
+    function setMode(mode: 'loop' | 'once') {
+        transform(() => ({ playback_mode: mode }));
+        void put(update.url({ screen: screen.id }), {
+            onSuccess: () => {
+                toast.success(
+                    mode === 'loop'
+                        ? 'Screen loops the playlist'
+                        : 'Screen plays once, then idles',
+                );
+                router.reload();
+            },
+            onError: toastApiError('Could not change playback mode'),
+        });
+    }
+
+    const mode = screen.playback_mode ?? 'loop';
+
+    return (
+        <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">Plays:</span>
+            <div className="flex overflow-hidden rounded-md border">
+                {(['loop', 'once'] as const).map((option) => (
+                    <Button
+                        key={option}
+                        type="button"
+                        variant={mode === option ? 'secondary' : 'ghost'}
+                        size="sm"
+                        disabled={processing}
+                        onClick={() => setMode(option)}
+                        className="rounded-none capitalize"
+                    >
+                        {option === 'loop' ? 'Loop' : 'Once'}
+                    </Button>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 function ScreenCard({
     screen,
     playlists,
@@ -451,6 +493,7 @@ function ScreenCard({
                         ? new Date(screen.last_seen_at).toLocaleString()
                         : 'never'}
                 </div>
+                <PlaybackModeToggle screen={screen} />
                 {(screen.screen_playlists ?? []).length > 0 && (
                     <ul className="space-y-1">
                         {(screen.screen_playlists ?? []).map((p) => (

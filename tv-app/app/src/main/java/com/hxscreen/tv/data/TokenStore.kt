@@ -36,4 +36,14 @@ class TokenStore(context: Context) {
     fun clear() {
         prefs.edit().remove("device_token").remove("token_saved_at").apply()
     }
+
+    /**
+     * Whether the dashboard paused playback. Persisted so a process death
+     * and recreation never auto-resumes a paused screen.
+     */
+    var userPaused: Boolean
+        get() = prefs.getBoolean("user_paused", false)
+        set(value) {
+            prefs.edit().putBoolean("user_paused", value).apply()
+        }
 }

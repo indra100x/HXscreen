@@ -1,11 +1,13 @@
 import {
     Head,
+    Link,
     router,
     setLayoutProps,
     useHttp,
     usePoll,
 } from '@inertiajs/react';
 import {
+    ChartColumn,
     Clapperboard,
     ListVideo,
     MonitorPlay,
@@ -16,7 +18,11 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import PlaylistsSection from '@/components/business/playlists-section';
 import ScreensSection from '@/components/business/screens-section';
+import TeamSection, { type Member } from '@/components/business/team-section';
 import VideosSection from '@/components/business/videos-section';
+import ActivitySection, {
+    type ActivityEntry,
+} from '@/components/business/activity-section';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -31,6 +37,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { dashboard } from '@/routes';
+import { analytics as businessAnalytics } from '@/routes/business';
 import { destroy, update } from '@/routes/businesses';
 import { toastApiError } from '@/lib/api-errors';
 import type { Business, Playlist, Screen, Video } from '@/types';
@@ -153,20 +160,26 @@ function StatCard({
     );
 }
 
-type Tab = 'screens' | 'playlists' | 'videos';
+type Tab = 'screens' | 'playlists' | 'videos' | 'team' | 'activity';
 
 export default function BusinessShow({
     business,
+    isOwner,
+    members,
     screens,
     playlists,
     videos,
     unpairedScreens,
+    activity,
 }: {
     business: Business;
+    isOwner: boolean;
+    members: Member[];
     screens: Screen[];
     playlists: Playlist[];
     videos: Video[];
     unpairedScreens: Screen[];
+    activity: ActivityEntry[];
 }) {
     const online = screens.filter(
         (s) =>
@@ -191,10 +204,12 @@ export default function BusinessShow({
         ],
     });
 
-    const tabs: { id: Tab; label: string; count: number }[] = [
+    const tabs: { id: Tab; label: string; count: number | null }[] = [
         { id: 'screens', label: 'Screens', count: screens.length },
         { id: 'playlists', label: 'Playlists', count: playlists.length },
         { id: 'videos', label: 'Videos', count: videos.length },
+        { id: 'team', label: 'Team', count: members.length || null },
+        { id: 'activity', label: 'Activity', count: null },
     ];
 
     return (
@@ -232,8 +247,22 @@ export default function BusinessShow({
                         </div>
                     </div>
                     <div className="flex gap-2">
-                        <RenameBusinessDialog business={business} />
-                        <DeleteBusinessButton business={business} />
+                        <Button variant="outline" size="sm" asChild>
+                            <Link
+                                href={businessAnalytics.url({
+                                    business: business.id,
+                                })}
+                            >
+                                <ChartColumn className="size-3.5" />
+                                Analytics
+                            </Link>
+                        </Button>
+                        {isOwner && (
+                            <>
+                                <RenameBusinessDialog business={business} />
+                                <DeleteBusinessButton business={business} />
+                            </>
+                        )}
                     </div>
                 </div>
 
@@ -267,9 +296,11 @@ export default function BusinessShow({
                                 className="gap-2"
                             >
                                 {t.label}
-                                <span className="rounded-full bg-muted px-1.5 text-xs font-semibold">
-                                    {t.count}
-                                </span>
+                                {t.count !== null && (
+                                    <span className="rounded-full bg-muted px-1.5 text-xs font-semibold">
+                                        {t.count}
+                                    </span>
+                                )}
                             </Button>
                         ))}
                     </div>
@@ -293,6 +324,14 @@ export default function BusinessShow({
                 {tab === 'videos' && (
                     <VideosSection businessId={business.id} videos={videos} />
                 )}
+                {tab === 'team' && (
+                    <TeamSection
+                        businessId={business.id}
+                        isOwner={isOwner}
+                        members={members}
+                    />
+                )}
+                {tab === 'activity' && <ActivitySection entries={activity} />}
             </div>
         </>
     );

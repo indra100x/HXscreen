@@ -5,11 +5,14 @@ namespace App\Providers;
 use Carbon\CarbonImmutable;
 use Illuminate\Auth\Events\Failed;
 use Illuminate\Auth\Events\Login;
+use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Console\Events\CommandStarting;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Validation\Rules\Password;
@@ -30,8 +33,26 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->configureDefaults();
+        $this->configureRateLimiting();
         $this->logAuthAttempts();
         $this->expireSessionsOnServerBoot();
+    }
+
+    /**
+     * Baseline abuse protection for the API: 60 requests per minute per
+     * user (or per IP for token devices). Sensitive routes carry stricter
+     * limits of their own.
+     */
+    protected function configureRateLimiting(): void
+    {
+        RateLimiter::for('api', function (Request $request) {
+            return Limit::perMinute(60)->by(
+                $request->user()?->id
+                    ?: $request->input('device_token')
+                    ?: $request->bearerToken()
+                    ?: $request->ip()
+            );
+        });
     }
 
     /**

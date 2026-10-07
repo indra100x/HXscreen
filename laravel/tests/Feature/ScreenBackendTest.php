@@ -1,6 +1,8 @@
 <?php
 
+use App\Models\AuditLog;
 use App\Models\Business;
+use App\Models\PlaybackStat;
 use App\Models\Playlist;
 use App\Models\Screen;
 use App\Models\User;
@@ -102,7 +104,7 @@ it('assigns playlists to a screen and serves ordered videos to the device', func
 });
 
 it('stores an uploaded video with a name and a reachable file', function () {
-    Storage::fake('public');
+    Storage::fake('r2');
 
     $user = User::factory()->create();
     $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
@@ -123,7 +125,8 @@ it('stores an uploaded video with a name and a reachable file', function () {
     $video = Video::findOrFail($response->json('video.id'));
 
     expect($video->name)->toBe('promo.mp4');
-    Storage::disk('public')->assertExists($video->url);
+    expect($video->disk)->toBe('r2');
+    Storage::disk('r2')->assertExists($video->url);
 
     $retry = $this->actingAs($user, 'sanctum')->post('/api/videos', [
         'busniss_id' => $business->id,
@@ -134,8 +137,8 @@ it('stores an uploaded video with a name and a reachable file', function () {
 
     // Same original name in the same second must not overwrite the first file.
     expect($retry->json('video.url'))->not->toBe($video->url);
-    Storage::disk('public')->assertExists($video->url);
-    Storage::disk('public')->assertExists($retry->json('video.url'));
+    Storage::disk('r2')->assertExists($video->url);
+    Storage::disk('r2')->assertExists($retry->json('video.url'));
 });
 
 it('rotates the device token on refresh and invalidates the old one', function () {
@@ -357,4 +360,308 @@ it('queues a remote command and clears it once the tv acks', function () {
 
     $this->getJson('/api/device/commands?device_token='.$token)
         ->assertOk()->assertJsonPath('command', null);
+});
+
+it('runs the complete business to playback flow', function () {
+    $user = User::factory()->create();
+    $auth = function () use ($user) {
+        return $this->actingAs($user, 'sanctum');
+    };
+
+    // Create business.
+    $businessId = $auth()->postJson('/api/businesses', ['name' => 'Cinema'])
+        ->assertCreated()->json('businesses.0.id');
+
+    // Pair TV.
+    $deviceId = 'tv-e2e';
+    $code = $this->postJson('/api/screens/request-pairing-code', ['device_id' => $deviceId])
+        ->assertOk()->json('pairing_code');
+    $token = $auth()->postJson('/api/screens/pair', [
+        'device_id' => $deviceId,
+        'pairing_code' => $code,
+        'busniss_id' => $businessId,
+    ])->assertOk()->json('device_token');
+
+    // Upload video.
+    Storage::fake('r2');
+    $mp4 = hex2bin('00000020667479706D703432000000006D70343269736F6D').str_repeat("\0", 512);
+    $videoId = $auth()->post('/api/videos', [
+        'busniss_id' => $businessId,
+        'video' => UploadedFile::fake()->createWithContent('film.mp4', $mp4)->mimeType('video/mp4'),
+    ])->assertCreated()->json('video.id');
+
+    // Create playlist, add video, schedule it onto the paired screen.
+    $playlistId = $auth()->postJson('/api/playlists', [
+        'name' => 'Evening',
+        'busniss_id' => $businessId,
+    ])->assertCreated()->json('playlist.id');
+
+    $auth()->postJson("/api/playlists/{$playlistId}/videos", ['video_id' => $videoId])->assertOk();
+
+    $screenId = Screen::where('device_id', $deviceId)->firstOrFail()->id;
+
+    $auth()->postJson("/api/screens/{$screenId}/playlists", [
+        'playlist_id' => $playlistId,
+        'start_time' => now()->subHour()->toDateTimeString(),
+        'end_time' => now()->addHour()->toDateTimeString(),
+    ])->assertOk();
+
+    // TV downloads/plays it.
+    $feed = $this->getJson('/api/device/content?device_token='.$token)->assertOk();
+    expect($feed->json('playlists.0.videos.0.id'))->toBe($videoId);
+
+    // Dashboard sees it.
+    $this->actingAs($user)->get(route('business.show', $businessId))->assertOk();
+
+    // Pause round trip.
+    $auth()->postJson("/api/screens/{$screenId}/command", ['action' => 'pause'])->assertOk();
+    $command = $this->getJson('/api/device/commands?device_token='.$token)->assertOk()->json('command');
+    expect($command['action'])->toBe('pause');
+    $this->postJson("/api/screens/{$screenId}/heartbeat", [
+        'device_token' => $token,
+        'ack_command_id' => $command['id'],
+    ])->assertOk();
+    $this->getJson('/api/device/commands?device_token='.$token)->assertOk()->assertJsonPath('command', null);
+
+    // Unpair (new code revokes the token) and re-pair.
+    $code2 = $this->postJson('/api/screens/request-pairing-code', ['device_id' => $deviceId])
+        ->assertOk()->json('pairing_code');
+    $this->getJson('/api/device/content?device_token='.$token)->assertUnauthorized();
+
+    $token2 = $auth()->postJson('/api/screens/pair', [
+        'device_id' => $deviceId,
+        'pairing_code' => $code2,
+        'busniss_id' => $businessId,
+    ])->assertOk()->json('device_token');
+    expect($token2)->not->toBe($token);
+    $this->getJson('/api/device/content?device_token='.$token2)->assertOk();
+});
+
+it('isolates every business resource from other users', function () {
+    $owner = User::factory()->create();
+    $intruder = User::factory()->create();
+    $business = Business::create(['user_id' => $owner->id, 'name' => 'Acme']);
+
+    [$token, $screen] = pairDeviceFor($this, $owner, $business, 'tv-vault');
+    $playlist = Playlist::create(['name' => 'Loop', 'busniss_id' => $business->id]);
+    $video = Video::create(['busniss_id' => $business->id, 'name' => 'A', 'url' => 'videos/a.mp4']);
+    $intruderPlaylist = Playlist::create(['name' => 'Mine', 'busniss_id' => Business::create(['user_id' => $intruder->id, 'name' => 'Rival'])->id]);
+
+    $asIntruder = function () use ($intruder) {
+        return $this->actingAs($intruder, 'sanctum');
+    };
+
+    // Screens.
+    $asIntruder()->getJson("/api/screens/{$screen->id}")->assertForbidden();
+    $asIntruder()->putJson("/api/screens/{$screen->id}", ['name' => 'Hijacked'])->assertForbidden();
+    $asIntruder()->deleteJson("/api/screens/{$screen->id}")->assertForbidden();
+    $asIntruder()->postJson("/api/screens/{$screen->id}/command", ['action' => 'pause'])->assertForbidden();
+    $asIntruder()->postJson("/api/screens/{$screen->id}/playlists", ['playlist_id' => $intruderPlaylist->id])->assertForbidden();
+
+    // Playlists.
+    $asIntruder()->getJson("/api/playlists/{$playlist->id}")->assertForbidden();
+    $asIntruder()->putJson("/api/playlists/{$playlist->id}", ['name' => 'Hijacked'])->assertForbidden();
+    $asIntruder()->deleteJson("/api/playlists/{$playlist->id}")->assertForbidden();
+    $asIntruder()->getJson("/api/playlists/{$playlist->id}/videos")->assertForbidden();
+    $asIntruder()->postJson("/api/playlists/{$playlist->id}/videos", ['video_id' => $video->id])->assertForbidden();
+
+    // Videos.
+    $asIntruder()->getJson("/api/videos/{$video->id}")->assertForbidden();
+    $asIntruder()->putJson("/api/videos/{$video->id}", ['name' => 'Hijacked'])->assertForbidden();
+    $asIntruder()->deleteJson("/api/videos/{$video->id}")->assertForbidden();
+
+    // Nothing changed.
+    expect($screen->fresh()->name)->not->toBe('Hijacked')
+        ->and($playlist->fresh()->name)->toBe('Loop')
+        ->and($video->fresh()->name)->toBe('A')
+        ->and(Screen::where('device_id', 'tv-vault')->exists())->toBeTrue();
+});
+
+it('rejects expired and revoked device tokens everywhere', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    [$token, $screen] = pairDeviceFor($this, $user, $business, 'tv-token');
+
+    // Expire the token.
+    $screen->device_token_expires_at = now()->subMinute();
+    $screen->save();
+
+    $this->postJson("/api/screens/{$screen->id}/heartbeat", ['device_token' => $token])
+        ->assertUnauthorized()->assertJsonPath('message', 'Device token expired');
+    $this->getJson('/api/device/content?device_token='.$token)->assertUnauthorized();
+    $this->getJson('/api/device/commands?device_token='.$token)->assertUnauthorized();
+    $this->postJson('/api/device/refresh', ['device_token' => $token])->assertUnauthorized();
+
+    // Revoke by requesting a fresh code.
+    $screen->device_token_expires_at = now()->addDays(30);
+    $screen->save();
+    $this->postJson('/api/screens/request-pairing-code', ['device_id' => 'tv-token'])->assertOk();
+
+    $this->postJson("/api/screens/{$screen->id}/heartbeat", ['device_token' => $token])
+        ->assertUnauthorized()->assertJsonPath('message', 'Unauthorized');
+    $this->getJson('/api/device/content?device_token='.$token)->assertUnauthorized();
+});
+
+it('streams video only through valid signed urls', function () {
+    Storage::fake('public');
+
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+    $video = Video::create(['busniss_id' => $business->id, 'disk' => 'public', 'name' => 'A', 'url' => 'videos/a.mp4']);
+    Storage::disk('public')->put('videos/a.mp4', 'fake-bytes');
+
+    $response = $this->get($video->media_url)->assertOk();
+    expect($response->streamedContent())->toBe('fake-bytes');
+
+    $this->get('/api/media/'.$video->id)->assertForbidden();
+    $this->get($video->media_url.'&tampered=1')->assertForbidden();
+
+    $expired = URL::signedRoute('media.show', ['video' => $video->id], now()->subMinute());
+    $this->get($expired)->assertForbidden();
+});
+
+it('points r2 videos at presigned cloudflare urls', function () {
+    Storage::fake('r2');
+
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+    $video = Video::create(['busniss_id' => $business->id, 'name' => 'A', 'url' => 'videos/a.mp4']);
+    $video->refresh();
+
+    expect($video->disk)->toBe('r2');
+    expect($video->media_url)->toContain('expiration=');
+});
+
+it('rate limits the api by default', function () {
+    $user = User::factory()->create();
+
+    $response = $this->actingAs($user, 'sanctum')->getJson('/api/businesses')->assertOk();
+
+    expect($response->headers->get('X-RateLimit-Limit'))->toBe('60');
+});
+
+it('switches a screen between loop and once playback', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    [$token, $screen] = pairDeviceFor($this, $user, $business, 'tv-mode');
+
+    expect($screen->playback_mode)->toBe('loop');
+
+    $this->actingAs($user, 'sanctum')
+        ->putJson("/api/screens/{$screen->id}", ['playback_mode' => 'once'])
+        ->assertOk();
+
+    expect($screen->fresh()->playback_mode)->toBe('once');
+
+    $this->actingAs($user, 'sanctum')
+        ->putJson("/api/screens/{$screen->id}", ['playback_mode' => 'forever'])
+        ->assertStatus(422);
+});
+
+it('accumulates play time across heartbeats without counting pauses', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    [$token, $screen] = pairDeviceFor($this, $user, $business, 'tv-stats');
+
+    $video = Video::create(['busniss_id' => $business->id, 'name' => 'A', 'url' => 'videos/a.mp4']);
+
+    $beat = function (?int $position = null, bool $playing = true) use ($screen, $token, $video) {
+        $payload = ['device_token' => $token, 'video_id' => $video->id];
+        if ($position !== null) {
+            $payload['position_ms'] = $position;
+        }
+        if (! $playing) {
+            $payload['is_playing'] = false;
+        }
+
+        return $this->postJson("/api/screens/{$screen->id}/heartbeat", $payload)->assertOk();
+    };
+
+    $beat(0);
+    $this->travel(60)->seconds();
+    $beat(60_000);
+    $this->travel(60)->seconds();
+    $beat(120_000);
+    $this->travel(60)->seconds();
+    $beat(180_000, playing: false);
+    $this->travel(60)->seconds();
+    $beat(180_000, playing: false);
+
+    $total = PlaybackStat::where('screen_id', $screen->id)->sum('seconds');
+
+    // Two 60s playing intervals, then paused beats add nothing.
+    expect($total)->toBe(120);
+});
+
+it('lets owners manage team members but nobody else', function () {
+    $owner = User::factory()->create();
+    $member = User::factory()->create();
+    $stranger = User::factory()->create();
+    $business = Business::create(['user_id' => $owner->id, 'name' => 'Acme']);
+
+    // Unknown email and non-owners are rejected.
+    $this->actingAs($owner, 'sanctum')
+        ->postJson("/api/businesses/{$business->id}/members", ['email' => 'ghost@example.com'])
+        ->assertStatus(422);
+
+    $this->actingAs($stranger, 'sanctum')
+        ->postJson("/api/businesses/{$business->id}/members", ['email' => $member->email])
+        ->assertForbidden();
+
+    // Invite works once, then conflicts.
+    $this->actingAs($owner, 'sanctum')
+        ->postJson("/api/businesses/{$business->id}/members", ['email' => $member->email])
+        ->assertOk();
+
+    $this->actingAs($owner, 'sanctum')
+        ->postJson("/api/businesses/{$business->id}/members", ['email' => $member->email])
+        ->assertStatus(409);
+
+    // The member can read and manage content...
+    [$token, $screen] = pairDeviceFor($this, $owner, $business, 'tv-team');
+
+    $this->actingAs($member, 'sanctum')->getJson("/api/screens/{$screen->id}")->assertOk();
+    $this->actingAs($member, 'sanctum')
+        ->putJson("/api/screens/{$screen->id}", ['name' => 'Lobby TV'])
+        ->assertOk();
+
+    // ...but cannot touch ownership or the team.
+    $this->actingAs($member, 'sanctum')
+        ->putJson("/api/businesses/{$business->id}", ['name' => 'Hijacked'])
+        ->assertForbidden();
+    $this->actingAs($member, 'sanctum')
+        ->postJson("/api/businesses/{$business->id}/members", ['email' => $stranger->email])
+        ->assertForbidden();
+    $this->actingAs($member, 'sanctum')
+        ->deleteJson("/api/businesses/{$business->id}")
+        ->assertForbidden();
+
+    // Owner cannot be removed; removal works.
+    $this->actingAs($owner, 'sanctum')
+        ->deleteJson("/api/businesses/{$business->id}/members/{$owner->id}")
+        ->assertStatus(422);
+
+    $this->actingAs($owner, 'sanctum')
+        ->deleteJson("/api/businesses/{$business->id}/members/{$member->id}")
+        ->assertOk();
+
+    $this->actingAs($member, 'sanctum')->getJson("/api/screens/{$screen->id}")->assertForbidden();
+});
+
+it('writes an audit trail for dashboard actions', function () {
+    $user = User::factory()->create();
+    $business = Business::create(['user_id' => $user->id, 'name' => 'Acme']);
+
+    [$token, $screen] = pairDeviceFor($this, $user, $business, 'tv-audit');
+
+    $this->actingAs($user, 'sanctum')
+        ->postJson("/api/screens/{$screen->id}/command", ['action' => 'pause'])
+        ->assertOk();
+
+    $actions = AuditLog::where('busniss_id', $business->id)->pluck('action')->all();
+
+    expect($actions)->toContain('screen.paired', 'screen.command_sent');
 });

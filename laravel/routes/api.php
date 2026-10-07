@@ -1,10 +1,12 @@
 <?php
 
 use App\Http\Controllers\BusinessController;
+use App\Http\Controllers\MediaController;
 use App\Http\Controllers\PlaylistController;
 use App\Http\Controllers\ScreenController;
 use App\Http\Controllers\VideoController;
 use Illuminate\Http\Request;
+use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Facades\Route;
 
 // Device endpoints: authenticated by pairing code / device token, not Sanctum.
@@ -12,7 +14,6 @@ Route::post('/screens/request-pairing-code', [ScreenController::class, 'requestP
     ->middleware('throttle:20,1')
     ->name('screens.request-code');
 Route::post('/screens/{screen}/heartbeat', [ScreenController::class, 'heartbeat'])
-    ->middleware('throttle:120,1')
     ->name('screens.heartbeat');
 Route::post('/device/refresh', [ScreenController::class, 'refreshDeviceToken'])
     ->middleware('throttle:10,1')
@@ -21,11 +22,17 @@ Route::post('/device/claim', [ScreenController::class, 'claimDevice'])
     ->middleware('throttle:30,1')
     ->name('device.claim');
 Route::get('/device/content', [ScreenController::class, 'deviceContent'])
-    ->middleware('throttle:120,1')
     ->name('device.content');
 Route::get('/device/commands', [ScreenController::class, 'deviceCommands'])
-    ->middleware('throttle:120,1')
     ->name('device.commands');
+
+// Signed, expiring media URLs. Deliberately outside auth and throttle:
+// the signature is the capability, players fetch per range chunk, and
+// NATed screens share one throttle bucket.
+Route::get('/media/{video}', [MediaController::class, 'show'])
+    ->middleware('signed')
+    ->withoutMiddleware(ThrottleRequests::class)
+    ->name('media.show');
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/user', function (Request $request) {
@@ -34,6 +41,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/screens/unpaired', [ScreenController::class, 'unpaired'])
         ->name('screens.unpaired');
+
+    Route::get('/businesses/{business}/members', [BusinessController::class, 'members'])
+        ->name('businesses.members.index');
+    Route::post('/businesses/{business}/members', [BusinessController::class, 'inviteMember'])
+        ->name('businesses.members.store');
+    Route::delete('/businesses/{business}/members/{member}', [BusinessController::class, 'removeMember'])
+        ->name('businesses.members.destroy');
 
     Route::apiResources([
         'businesses' => BusinessController::class,

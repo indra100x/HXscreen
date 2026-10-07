@@ -1,7 +1,12 @@
 package com.hxscreen.tv.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -9,12 +14,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -23,6 +38,7 @@ import androidx.media3.ui.PlayerView
 import com.hxscreen.tv.data.ApiException
 import com.hxscreen.tv.data.ContentFeed
 import com.hxscreen.tv.data.HxApi
+import com.hxscreen.tv.data.TokenStore
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -31,10 +47,13 @@ private const val CONTENT_REFRESH_MS = 15_000L
 private const val COMMAND_POLL_MS = 2_000L
 private const val REFRESH_AFTER_MS = 23L * 24 * 60 * 60 * 1000
 
+/** Signed media URLs live 6h; rebuild playback before they can expire. */
+private const val URL_MAX_AGE_MS = 5L * 60 * 60 * 1000
+
 /**
  * Fullscreen looping playback of the screen's content feed.
  *
- * Heartbeats every 30 seconds and re-fetches the playlist every 15 seconds,
+ * Heartbeats every 15 seconds and re-fetches the playlist every 15 seconds,
  * so dashboard changes (assign, reorder, schedule) appear without
  * restarting the app. Any auth failure returns to pairing.
  */
@@ -43,21 +62,94 @@ fun PlayerScreen(
     api: HxApi,
     token: String,
     tokenSavedAt: Long,
+    store: TokenStore,
+    controlsBus: ControlsBus,
     onTokenRefreshed: (String) -> Unit,
     onUnpaired: () -> Unit,
 ) {
     val context = LocalContext.current
     var status by remember { mutableStateOf("Loading…") }
+    var playingUi by remember { mutableStateOf(true) }
+    var controlsVisible by remember { mutableStateOf(false) }
+    var controlsTick by remember { mutableIntStateOf(0) }
+    val playFocus = remember { FocusRequester() }
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
             repeatMode = Player.REPEAT_MODE_ALL
-            playWhenReady = true
+            // A paused screen must survive process death still paused.
+            playWhenReady = !store.userPaused
         }
     }
 
     DisposableEffect(Unit) {
-        onDispose { exoPlayer.release() }
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                playingUi = isPlaying
+            }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                if (
+                    state == Player.STATE_ENDED &&
+                    exoPlayer.repeatMode == Player.REPEAT_MODE_OFF
+                ) {
+                    status = "Finished"
+                }
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.release()
+        }
+    }
+
+    // On-TV controls: OK on the remote reveals them, buttons stay
+    // D-pad navigable, and they hide again after a few seconds.
+    LaunchedEffect(controlsVisible, controlsTick) {
+        if (controlsVisible) {
+            try {
+                playFocus.requestFocus()
+            } catch (_: Exception) {
+                // Focus service unavailable: buttons still work by touch.
+            }
+            delay(4000)
+            controlsVisible = false
+        }
+    }
+
+    fun pokeControls() {
+        controlsVisible = true
+        controlsTick++
+    }
+
+    // Served by MainActivity.onKeyDown, which sees remote keys even when
+    // the native video surface holds focus and Compose key handlers
+    // never fire. Only consumes OK while the controls are hidden so
+    // button activation keeps working once they are visible.
+    val controlsHidden by rememberUpdatedState(!controlsVisible)
+
+    DisposableEffect(Unit) {
+        controlsBus.onOk = {
+            if (controlsHidden) {
+                pokeControls()
+                true
+            } else {
+                false
+            }
+        }
+        onDispose { controlsBus.onOk = null }
+    }
+
+    fun togglePlayPause() {
+        if (exoPlayer.isPlaying) {
+            exoPlayer.pause()
+            store.userPaused = true
+        } else {
+            exoPlayer.play()
+            store.userPaused = false
+        }
+        pokeControls()
     }
 
     // Latest applied remote command: sent back as the heartbeat ack so the
@@ -80,8 +172,14 @@ fun PlayerScreen(
                     appliedId = null
                 } else if (command.id != appliedId) {
                     when (command.action) {
-                        "pause" -> exoPlayer.pause()
-                        "resume" -> exoPlayer.play()
+                        "pause" -> {
+                            store.userPaused = true
+                            exoPlayer.pause()
+                        }
+                        "resume" -> {
+                            store.userPaused = false
+                            exoPlayer.play()
+                        }
                         "seek_by" -> exoPlayer.seekTo(
                             (exoPlayer.currentPosition + (command.arg ?: 0) * 1000)
                                 .coerceAtLeast(0),
@@ -127,13 +225,22 @@ fun PlayerScreen(
             var screenId = ""
             var currentSignature = ""
             var nextChangeMs: Long? = null
+            var firstLoad = true
+            var urlsMintedAt = 0L
 
             // Applies a fresh feed, restarting playback only when the
             // lineup (playlists, videos, or windows) actually changed.
+            // Repeat mode applies live so a dashboard toggle takes
+            // effect without restarting the video.
             fun applyFeed(feed: ContentFeed) {
                 screenId = feed.screenId
                 knownScreenId = feed.screenId
                 nextChangeMs = feed.nextChangeMs
+                exoPlayer.repeatMode = if (feed.playbackMode == "once") {
+                    Player.REPEAT_MODE_OFF
+                } else {
+                    Player.REPEAT_MODE_ALL
+                }
                 val signature = feed.playlists.joinToString("|") { playlist ->
                     playlist.id + ":" +
                         playlist.videos.joinToString(",") { it.id } + ":" +
@@ -141,6 +248,13 @@ fun PlayerScreen(
                 }
                 if (signature != currentSignature) {
                     currentSignature = signature
+                    urlsMintedAt = System.currentTimeMillis()
+                    if (!firstLoad) {                        // A fresh lineup always starts playing: a newly
+                        // assigned playlist must not inherit a stale pause.
+                        // The very first load still honors a saved pause.
+                        store.userPaused = false
+                    }
+                    firstLoad = false
                     val urls = feed.videos.map { it.url }
                     if (urls.isEmpty()) {
                         exoPlayer.stop()
@@ -156,7 +270,9 @@ fun PlayerScreen(
                             },
                         )
                         exoPlayer.prepare()
-                        exoPlayer.play()
+                        if (!store.userPaused) {
+                            exoPlayer.play()
+                        }
                         status = ""
                     }
                 }
@@ -197,8 +313,16 @@ fun PlayerScreen(
 
                 val windowEnded =
                     nextChangeMs?.let { System.currentTimeMillis() >= it } == true
-                if (elapsed >= CONTENT_REFRESH_MS || windowEnded) {
+                val urlsStale =
+                    urlsMintedAt > 0 &&
+                        System.currentTimeMillis() - urlsMintedAt > URL_MAX_AGE_MS
+                if (elapsed >= CONTENT_REFRESH_MS || windowEnded || urlsStale) {
                     elapsed = 0L
+                    if (urlsStale) {
+                        // Force a rebuild so playback picks up fresh
+                        // signed URLs before the old ones expire.
+                        currentSignature = ""
+                    }
                     try {
                         applyFeed(api.content(activeToken))
                     } catch (e: ApiException) {
@@ -221,18 +345,87 @@ fun PlayerScreen(
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .onPreviewKeyEvent {
+                    // Generic TV remotes send Enter, classic ones D-pad
+                    // center: accept either as "OK".
+                    val isOk = it.key == Key.DirectionCenter ||
+                        it.key == Key.Enter ||
+                        it.key == Key.NumPadEnter
+                    if (!controlsVisible && isOk && it.type == KeyEventType.KeyDown) {
+                        pokeControls()
+                        true
+                    } else {
+                        false
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
                     PlayerView(ctx).apply {
                         this.player = exoPlayer
                         useController = false
+                        // Keep D-pad focus in Compose so remote keys stay
+                        // routable; the Activity handles OK globally anyway.
+                        isFocusable = false
+                        isFocusableInTouchMode = false
                     }
                 },
             )
             if (status.isNotEmpty()) {
                 Text(status, color = MaterialTheme.colorScheme.onBackground)
+            }
+            if (controlsVisible) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    horizontalArrangement = Arrangement.spacedBy(
+                        16.dp,
+                        Alignment.CenterHorizontally,
+                    ),
+                ) {
+                    Button(
+                        modifier = Modifier.focusRequester(playFocus),
+                        onClick = { togglePlayPause() },
+                    ) {
+                        Text(if (playingUi) "Pause" else "Play")
+                    }
+                    Button(
+                        onClick = {
+                            exoPlayer.seekTo(
+                                (exoPlayer.currentPosition - 10_000)
+                                    .coerceAtLeast(0),
+                            )
+                            pokeControls()
+                        },
+                    ) {
+                        Text("-10s")
+                    }
+                    Button(
+                        onClick = {
+                            exoPlayer.seekTo(exoPlayer.currentPosition + 10_000)
+                            pokeControls()
+                        },
+                    ) {
+                        Text("+10s")
+                    }
+                    Button(
+                        onClick = {
+                            exoPlayer.pause()
+                            exoPlayer.seekTo(0)
+                            store.userPaused = true
+                            pokeControls()
+                        },
+                    ) {
+                        Text("Stop")
+                    }
+                }
             }
         }
     }

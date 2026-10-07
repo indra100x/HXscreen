@@ -5,13 +5,15 @@ namespace App\Models;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Carbon;
 use Laravel\Fortify\TwoFactorAuthenticatable;
 use Laravel\Sanctum\HasApiTokens;
+
 /**
  * @property int $id
  * @property string $name
@@ -30,9 +32,10 @@ use Laravel\Sanctum\HasApiTokens;
 class User extends Authenticatable
 {
     use HasApiTokens;
-    use HasUuids;
     /** @use HasFactory<UserFactory> */
     use HasFactory, Notifiable, TwoFactorAuthenticatable;
+
+    use HasUuids;
 
     /**
      * Get the attributes that should be cast.
@@ -47,9 +50,33 @@ class User extends Authenticatable
             'two_factor_confirmed_at' => 'datetime',
         ];
     }
+
     public function businesses()
     {
         return $this->hasMany(Business::class);
     }
 
+    public function memberBusinesses(): BelongsToMany
+    {
+        return $this->belongsToMany(Business::class, 'business_user', 'user_id', 'busniss_id')
+            ->withTimestamps();
+    }
+
+    /**
+     * IDs of every business the user owns or is a member of.
+     *
+     * @return list<string>
+     */
+    public function accessibleBusinessIds(): array
+    {
+        $owned = $this->businesses()->pluck('busniss.id')->toArray();
+        $member = $this->memberBusinesses()->pluck('busniss.id')->toArray();
+
+        return array_values(array_unique([...$owned, ...$member]));
+    }
+
+    public function ownsBusiness(Business $business): bool
+    {
+        return $business->user_id === $this->id;
+    }
 }

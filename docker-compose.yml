@@ -1,0 +1,47 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:80"
+    environment:
+      APP_NAME: HXscreen
+      APP_ENV: production
+      APP_DEBUG: "false"
+      # Generate once with: php artisan key:generate --show
+      APP_KEY: ${APP_KEY:?Set APP_KEY in your shell or a .env file (run php artisan key:generate --show)}
+      # Public origin of the app. Use https://your-domain behind a proxy.
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      DB_CONNECTION: sqlite
+      #DB_DATABASE: /var/www/html/laravel/database/database.sqlite
+      SESSION_DRIVER: database
+      SESSION_SECURE_COOKIE: "false" # set "true" once APP_URL is https
+      # Hosts allowed to use cookie (session) auth on /api. Must include
+      # every origin you open the dashboard from, with ports.
+      SANCTUM_STATEFUL_DOMAINS: "localhost,localhost:8080,127.0.0.1,127.0.0.1:8080,192.168.1.8:8080"
+      CACHE_STORE: redis
+      REDIS_CLIENT: predis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      QUEUE_CONNECTION: database
+      FILESYSTEM_DISK: public
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?Set R2 credentials (see below)}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?Set R2 credentials (see below)}
+      R2_DEFAULT_REGION: ${R2_DEFAULT_REGION:-auto}
+      R2_BUCKET: ${R2_BUCKET:-hxscreen-videos}
+      R2_ENDPOINT: ${R2_ENDPOINT:?Set R2 credentials (see below)}
+      R2_USE_PATH_STYLE_ENDPOINT: "false"
+      PHP_INI_SCAN_DIR: /usr/local/etc/php/conf.d
+    volumes:
+      # Persist the database and uploads across restarts/rebuilds.
+      - app-db:/var/www/html/laravel/database
+      - app-storage:/var/www/html/laravel/storage/app/public
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    restart: unless-stopped
+
+volumes:
+  app-db:
+  app-storage:

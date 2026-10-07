@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Business;
+use App\Models\AuditLog;
 use App\Models\Playlist;
 use App\Models\Video;
 use Illuminate\Http\Request;
@@ -20,7 +20,7 @@ class PlaylistController extends Controller
             'route' => $request->route()?->getName(),
         ]);
 
-        $businessIds = $user->businesses()->pluck('id')->toArray();
+        $businessIds = $this->accessibleBusinessIds($user);
 
         $playlists = Playlist::whereIn('busniss_id', $businessIds)->get();
 
@@ -41,12 +41,14 @@ class PlaylistController extends Controller
             'busniss_id' => 'required|exists:busniss,id',
         ]);
 
-        $this->ensureBusinessOwned($user, $request->busniss_id);
+        $this->ensureBusinessAccess($user, $request->busniss_id);
 
         $playlist = Playlist::create([
             'name' => $request->name,
             'busniss_id' => $request->busniss_id,
         ]);
+
+        AuditLog::record($user, 'playlist.created', $playlist->busniss_id, $playlist, [], $request->ip());
 
         return response()->json([
             'message' => 'Playlist created successfully',
@@ -81,6 +83,8 @@ class PlaylistController extends Controller
 
         $playlist->delete();
 
+        AuditLog::record($user, 'playlist.deleted', $playlist->busniss_id, $playlist);
+
         return response()->json(['message' => 'Playlist deleted successfully'], 200);
     }
 
@@ -103,6 +107,8 @@ class PlaylistController extends Controller
         $playlist->update([
             'name' => $request->name,
         ]);
+
+        AuditLog::record($user, 'playlist.updated', $playlist->busniss_id, $playlist, [], $request->ip());
 
         return response()->json([
             'message' => 'Playlist updated successfully',
@@ -128,8 +134,8 @@ class PlaylistController extends Controller
 
         $video = Video::findOrFail($request->video_id);
 
-        if (! $video->business || $video->business->user_id !== $user->id) {
-            abort(403);
+        if (! $video->business || ! $video->business->isAccessibleBy($user)) {
+            abort($video->business ? 403 : 404);
         }
 
         if ($playlist->videos()->where('video.id', $video->id)->exists()) {
@@ -142,6 +148,10 @@ class PlaylistController extends Controller
             'id' => (string) Str::uuid(),
             'order' => $maxOrder + 1,
         ]);
+
+        AuditLog::record($user, 'playlist.video_added', $playlist->busniss_id, $playlist, [
+            'video_id' => $video->id,
+        ], $request->ip());
 
         return response()->json([
             'message' => 'Video added to playlist successfully',
@@ -165,6 +175,10 @@ class PlaylistController extends Controller
         ]);
 
         $playlist->videos()->detach($request->video_id);
+
+        AuditLog::record($user, 'playlist.video_removed', $playlist->busniss_id, $playlist, [
+            'video_id' => $request->video_id,
+        ], $request->ip());
 
         return response()->json([
             'message' => 'Video removed from playlist successfully',
@@ -203,7 +217,7 @@ class PlaylistController extends Controller
         ]);
 
         $ownedIds = Video::whereIn('id', $request->video_ids)
-            ->whereHas('business', fn ($query) => $query->where('user_id', $user->id))
+            ->whereIn('busniss_id', $this->accessibleBusinessIds($user))
             ->pluck('id')
             ->all();
 
@@ -227,6 +241,8 @@ class PlaylistController extends Controller
 
         $playlist->videos()->sync($sync);
 
+        AuditLog::record($user, 'playlist.videos_ordered', $playlist->busniss_id, $playlist, [], $request->ip());
+
         return response()->json([
             'message' => 'Videos ordered successfully',
         ], 200);
@@ -234,21 +250,8 @@ class PlaylistController extends Controller
 
     protected function authorizePlaylist($user, Playlist $playlist): void
     {
-        if (! $playlist->business) {
-            abort(404);
-        }
-
-        if ($playlist->business->user_id !== $user->id) {
-            abort(403);
-        }
-    }
-
-    protected function ensureBusinessOwned($user, string $businessId): void
-    {
-        $business = Business::findOrFail($businessId);
-
-        if ($business->user_id !== $user->id) {
-            abort(403);
+        if (! $playlist->business || ! $playlist->business->isAccessibleBy($user)) {
+            abort($playlist->business ? 403 : 404);
         }
     }
 }

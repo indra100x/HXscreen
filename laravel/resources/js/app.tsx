@@ -1,4 +1,5 @@
-import { createInertiaApp } from '@inertiajs/react';
+import { createInertiaApp, router } from '@inertiajs/react';
+import { toast } from 'sonner';
 import { Toaster } from '@/components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { initializeTheme } from '@/hooks/use-appearance';
@@ -38,3 +39,24 @@ void createInertiaApp({
 
 // This will set light / dark mode on load...
 initializeTheme();
+
+// Non-validation HTTP failures (401/403/419/500) never reach form onError
+// handlers, so surface them globally — otherwise requests fail silently.
+router.on('httpException', (event) => {
+    const detail = event.detail as unknown as {
+        response?: { status?: number; data?: { message?: unknown } };
+        status?: number;
+    };
+    const status = detail.response?.status ?? detail.status;
+    const serverMessage = detail.response?.data?.message;
+
+    if (typeof serverMessage === 'string' && serverMessage) {
+        toast.error(serverMessage);
+    } else if (status === 401) {
+        toast.error('Please log in again.');
+    } else if (status === 419) {
+        toast.error('Session expired — refresh the page and retry.');
+    } else {
+        toast.error('Request failed. Please try again.');
+    }
+});

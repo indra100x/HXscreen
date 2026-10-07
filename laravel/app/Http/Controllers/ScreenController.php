@@ -2,16 +2,22 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AuditLog;
 use App\Models\Business;
+use App\Models\PlaybackStat;
 use App\Models\Playlist;
 use App\Models\Screen;
+use Carbon\Carbon;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class ScreenController extends Controller
 {
-    public function index(Request $request)
+    private const DEVICE_TOKEN_TTL_DAYS = 30;
+
+    public function index(Request $request): JsonResponse
     {
         $user = $request->user();
 
@@ -20,14 +26,14 @@ class ScreenController extends Controller
             'route' => $request->route()?->getName(),
         ]);
 
-        $businessIds = $user->businesses()->pluck('id')->toArray();
+        $businessIds = $this->accessibleBusinessIds($user);
 
         $screens = Screen::whereIn('busniss_id', $businessIds)->get();
 
         return response()->json($screens);
     }
 
-    public function store(Request $request)
+    public function store(Request $request): JsonResponse
     {
         $user = $request->user();
 
@@ -42,13 +48,15 @@ class ScreenController extends Controller
             'device_id' => 'required|string|max:255',
         ]);
 
-        $this->ensureBusinessOwned($user, $request->busniss_id);
+        $this->ensureBusinessAccess($user, $request->busniss_id);
 
         $screen = Screen::create([
             'name' => $request->name,
             'busniss_id' => $request->busniss_id,
             'device_id' => $request->device_id,
         ]);
+
+        AuditLog::record($user, 'screen.created', $screen->busniss_id, $screen, [], $request->ip());
 
         return response()->json([
             'message' => 'Screen created successfully',
@@ -62,7 +70,7 @@ class ScreenController extends Controller
      * never codes or tokens — so one account cannot hijack another
      * account's TV. The physical code on the TV stays the proof.
      */
-    public function unpaired()
+    public function unpaired(): JsonResponse
     {
         return response()->json(
             Screen::whereNotNull('pairing_code')
@@ -73,7 +81,7 @@ class ScreenController extends Controller
         );
     }
 
-    public function show(Screen $screen)
+    public function show(Screen $screen): JsonResponse
     {
         $user = auth()->user();
 
@@ -87,7 +95,7 @@ class ScreenController extends Controller
         return response()->json(['screen' => $screen]);
     }
 
-    public function destroy(Screen $screen)
+    public function destroy(Screen $screen): JsonResponse
     {
         $user = auth()->user();
 
@@ -100,17 +108,19 @@ class ScreenController extends Controller
 
         $screen->delete();
 
+        AuditLog::record($user, 'screen.deleted', $screen->busniss_id, $screen);
+
         return response()->json(['message' => 'Screen deleted successfully'], 200);
     }
 
-    public function update(Request $request, Screen $screen)
+    public function update(Request $request, Screen $screen): JsonResponse
     {
         $user = auth()->user();
 
         Log::info('ScreenController@update', [
             'user_id' => $user?->id,
             'screen_id' => $screen->id,
-            'payload' => $request->only(['name', 'device_id', 'busniss_id']),
+            'payload' => $request->only(['name', 'device_id', 'busniss_id', 'playback_mode']),
         ]);
 
         $this->authorizeScreen($user, $screen);
@@ -119,13 +129,16 @@ class ScreenController extends Controller
             'name' => 'sometimes|required|string|max:50',
             'device_id' => 'sometimes|required|string|max:255',
             'busniss_id' => 'sometimes|required|exists:busniss,id',
+            'playback_mode' => 'sometimes|required|in:loop,once',
         ]);
 
         if ($request->filled('busniss_id')) {
-            $this->ensureBusinessOwned($user, $request->busniss_id);
+            $this->ensureBusinessAccess($user, $request->busniss_id);
         }
 
-        $screen->update($request->only(['name', 'device_id', 'busniss_id']));
+        $screen->update($request->only(['name', 'device_id', 'busniss_id', 'playback_mode']));
+
+        AuditLog::record($user, 'screen.updated', $screen->busniss_id, $screen, [], $request->ip());
 
         return response()->json([
             'message' => 'Screen updated successfully',
@@ -133,7 +146,7 @@ class ScreenController extends Controller
         ], 200);
     }
 
-    public function requestPairingCode(Request $request)
+    public function requestPairingCode(Request $request): JsonResponse
     {
         $request->validate([
             'device_id' => 'required|string|max:255',
@@ -169,7 +182,7 @@ class ScreenController extends Controller
         ], 200);
     }
 
-    public function pair(Request $request)
+    public function pair(Request $request): JsonResponse
     {
         $user = $request->user();
 
@@ -191,7 +204,7 @@ class ScreenController extends Controller
             return response()->json(['message' => 'Device not found'], 404);
         }
 
-        if (! $screen->pairing_code || strtoupper($screen->pairing_code) !== strtoupper($request->pairing_code)) {
+        if (! $this->pairingCodeMatches($screen, $request->pairing_code)) {
             return response()->json(['message' => 'Invalid pairing code'], 422);
         }
 
@@ -199,13 +212,10 @@ class ScreenController extends Controller
             return response()->json(['message' => 'Pairing code expired'], 422);
         }
 
-        // Store only the hash; the raw token is shown once and never stored.
-        $rawToken = Str::random(64);
+        $rawToken = $this->issueDeviceToken($screen);
 
         $screen->busniss_id = $business->id;
         $screen->paired_at = now();
-        $screen->device_token = hash('sha256', $rawToken);
-        $screen->device_token_expires_at = now()->addDays(30);
         $screen->pairing_code = null;
         $screen->pairing_code_expires_at = null;
         $screen->save();
@@ -216,6 +226,8 @@ class ScreenController extends Controller
             'busniss_id' => $screen->busniss_id,
         ]);
 
+        AuditLog::record($user, 'screen.paired', $screen->busniss_id, $screen, [], $request->ip());
+
         return response()->json([
             'message' => 'Screen paired successfully',
             'device_id' => $screen->device_id,
@@ -224,9 +236,9 @@ class ScreenController extends Controller
         ], 200);
     }
 
-    public function heartbeat(Request $request, Screen $screen)
+    public function heartbeat(Request $request, Screen $screen): JsonResponse
     {
-        $token = $request->bearerToken() ?: $request->input('device_token');
+        $token = $this->deviceTokenFrom($request);
 
         Log::info('ScreenController@heartbeat', [
             'screen_id' => $screen->id,
@@ -234,11 +246,11 @@ class ScreenController extends Controller
         ]);
 
         if (! $token || ! $screen->device_token || ! hash_equals($screen->device_token, hash('sha256', $token))) {
-            return response()->json(['message' => 'Unauthorized'], 401);
+            return $this->unauthorized();
         }
 
-        if ($screen->device_token_expires_at && $screen->device_token_expires_at->isPast()) {
-            return response()->json(['message' => 'Device token expired'], 401);
+        if ($this->deviceTokenIsExpired($screen)) {
+            return $this->unauthorized('Device token expired');
         }
 
         $request->validate([
@@ -247,9 +259,12 @@ class ScreenController extends Controller
             'is_playing' => 'nullable|boolean',
         ]);
 
+        $previousSeenAt = $screen->last_seen_at;
         $screen->last_seen_at = now();
 
         if ($request->filled('video_id')) {
+            $this->accumulatePlayTime($screen, $previousSeenAt, $request->video_id, $request->boolean('is_playing', true));
+
             $screen->current_video_id = $request->video_id;
             $screen->current_position_ms = $request->input('position_ms', 0);
             $screen->position_reported_at = now();
@@ -271,7 +286,7 @@ class ScreenController extends Controller
         ], 200);
     }
 
-    public function getPlaylists(Screen $screen)
+    public function getPlaylists(Screen $screen): JsonResponse
     {
         $user = auth()->user();
 
@@ -280,7 +295,7 @@ class ScreenController extends Controller
         return response()->json($screen->screenPlaylists()->with('videos')->get());
     }
 
-    public function attachPlaylist(Request $request, Screen $screen)
+    public function attachPlaylist(Request $request, Screen $screen): JsonResponse
     {
         $user = auth()->user();
 
@@ -312,10 +327,20 @@ class ScreenController extends Controller
             'end_time' => $request->end_time,
         ]);
 
+        Log::info('ScreenController@attachPlaylist', [
+            'user_id' => $user->id,
+            'screen_id' => $screen->id,
+            'playlist_id' => $playlist->id,
+        ]);
+
+        AuditLog::record($user, 'screen.playlist_attached', $screen->busniss_id, $screen, [
+            'playlist_id' => $playlist->id,
+        ], $request->ip());
+
         return response()->json(['message' => 'Playlist assigned to screen successfully'], 200);
     }
 
-    public function detachPlaylist(Request $request, Screen $screen)
+    public function detachPlaylist(Request $request, Screen $screen): JsonResponse
     {
         $user = auth()->user();
 
@@ -327,10 +352,20 @@ class ScreenController extends Controller
 
         $screen->screenPlaylists()->detach($request->playlist_id);
 
+        Log::info('ScreenController@detachPlaylist', [
+            'user_id' => $user->id,
+            'screen_id' => $screen->id,
+            'playlist_id' => $request->playlist_id,
+        ]);
+
+        AuditLog::record($user, 'screen.playlist_detached', $screen->busniss_id, $screen, [
+            'playlist_id' => $request->playlist_id,
+        ], $request->ip());
+
         return response()->json(['message' => 'Playlist removed from screen successfully'], 200);
     }
 
-    public function updatePlaylistSchedule(Request $request, Screen $screen)
+    public function updatePlaylistSchedule(Request $request, Screen $screen): JsonResponse
     {
         $user = auth()->user();
 
@@ -351,6 +386,10 @@ class ScreenController extends Controller
             'end_time' => $request->end_time,
         ]);
 
+        AuditLog::record($user, 'screen.schedule_updated', $screen->busniss_id, $screen, [
+            'playlist_id' => $request->playlist_id,
+        ], $request->ip());
+
         return response()->json(['message' => 'Schedule updated successfully'], 200);
     }
 
@@ -359,7 +398,7 @@ class ScreenController extends Controller
      * screen has been paired yet, and hands over a device token exactly once
      * the dashboard completes pairing.
      */
-    public function claimDevice(Request $request)
+    public function claimDevice(Request $request): JsonResponse
     {
         $request->validate([
             'device_id' => 'required|string|max:255',
@@ -372,10 +411,7 @@ class ScreenController extends Controller
             return response()->json(['message' => 'Device not found'], 404);
         }
 
-        if (
-            $screen->pairing_code &&
-            strtoupper($screen->pairing_code) === strtoupper($request->pairing_code)
-        ) {
+        if ($this->pairingCodeMatches($screen, $request->pairing_code)) {
             if ($screen->pairing_code_expires_at && $screen->pairing_code_expires_at->isPast()) {
                 return response()->json(['message' => 'Pairing code expired'], 422);
             }
@@ -384,10 +420,7 @@ class ScreenController extends Controller
         }
 
         if ($screen->device_token) {
-            $rawToken = Str::random(64);
-
-            $screen->device_token = hash('sha256', $rawToken);
-            $screen->device_token_expires_at = now()->addDays(30);
+            $rawToken = $this->issueDeviceToken($screen);
             $screen->last_seen_at = now();
             $screen->save();
 
@@ -399,7 +432,7 @@ class ScreenController extends Controller
                 'paired' => true,
                 'device_id' => $screen->device_id,
                 'device_token' => $rawToken,
-                'expires_in_seconds' => 30 * 24 * 60 * 60,
+                'expires_in_seconds' => self::DEVICE_TOKEN_TTL_DAYS * 24 * 60 * 60,
             ], 200);
         }
 
@@ -409,35 +442,26 @@ class ScreenController extends Controller
     /**
      * Rotate a valid device token. Authenticated by device token, not Sanctum.
      */
-    public function refreshDeviceToken(Request $request)
+    public function refreshDeviceToken(Request $request): JsonResponse
     {
-        $token = $request->bearerToken() ?: $request->input('device_token');
-
-        if (! $token) {
-            return response()->json(['message' => 'Unauthorized'], 401);
-        }
-
-        $screen = Screen::where('device_token', hash('sha256', $token))->first();
+        $screen = $this->findScreenByToken($this->deviceTokenFrom($request));
 
         if (! $screen) {
-            return response()->json(['message' => 'Unauthorized'], 401);
+            return $this->unauthorized();
         }
 
-        if ($screen->device_token_expires_at && $screen->device_token_expires_at->isPast()) {
-            return response()->json(['message' => 'Device token expired'], 401);
+        if ($this->deviceTokenIsExpired($screen)) {
+            return $this->unauthorized('Device token expired');
         }
 
-        $rawToken = Str::random(64);
-
-        $screen->device_token = hash('sha256', $rawToken);
-        $screen->device_token_expires_at = now()->addDays(30);
+        $rawToken = $this->issueDeviceToken($screen);
         $screen->last_seen_at = now();
         $screen->save();
 
         return response()->json([
             'device_id' => $screen->device_id,
             'device_token' => $rawToken,
-            'expires_in_seconds' => 30 * 24 * 60 * 60,
+            'expires_in_seconds' => self::DEVICE_TOKEN_TTL_DAYS * 24 * 60 * 60,
         ], 200);
     }
 
@@ -445,7 +469,7 @@ class ScreenController extends Controller
      * Queue a remote-control command for the TV: pause, resume, or seek by
      * a relative number of seconds. Replaces any previous pending command.
      */
-    public function sendCommand(Request $request, Screen $screen)
+    public function sendCommand(Request $request, Screen $screen): JsonResponse
     {
         $user = auth()->user();
 
@@ -468,6 +492,16 @@ class ScreenController extends Controller
         ];
         $screen->save();
 
+        Log::info('ScreenController@sendCommand', [
+            'user_id' => $user->id,
+            'screen_id' => $screen->id,
+            'action' => $request->action,
+        ]);
+
+        AuditLog::record($user, 'screen.command_sent', $screen->busniss_id, $screen, [
+            'action' => $request->action,
+        ], $request->ip());
+
         return response()->json(['message' => 'Command queued'], 200);
     }
 
@@ -475,27 +509,21 @@ class ScreenController extends Controller
      * The TV's command inbox. Commands older than two minutes are dropped
      * so an offline TV never acts on stale input when it returns.
      */
-    public function deviceCommands(Request $request)
+    public function deviceCommands(Request $request): JsonResponse
     {
-        $token = $request->bearerToken() ?: $request->input('device_token');
-
-        if (! $token) {
-            return response()->json(['message' => 'Unauthorized'], 401);
-        }
-
-        $screen = Screen::where('device_token', hash('sha256', $token))->first();
+        $screen = $this->findScreenByToken($this->deviceTokenFrom($request));
 
         if (! $screen) {
-            return response()->json(['message' => 'Unauthorized'], 401);
+            return $this->unauthorized();
         }
 
-        if ($screen->device_token_expires_at && $screen->device_token_expires_at->isPast()) {
-            return response()->json(['message' => 'Device token expired'], 401);
+        if ($this->deviceTokenIsExpired($screen)) {
+            return $this->unauthorized('Device token expired');
         }
 
         $command = $screen->pending_command;
 
-        if (is_array($command) && isset($command['created_at']) && now()->parse($command['created_at'])->addMinutes(2)->isPast()) {
+        if (is_array($command) && isset($command['created_at']) && Carbon::parse($command['created_at'])->addMinutes(2)->isPast()) {
             $command = null;
             $screen->pending_command = null;
             $screen->save();
@@ -507,22 +535,16 @@ class ScreenController extends Controller
     /**
      * Content feed for a paired device. Authenticated by device token, not Sanctum.
      */
-    public function deviceContent(Request $request)
+    public function deviceContent(Request $request): JsonResponse
     {
-        $token = $request->bearerToken() ?: $request->input('device_token');
-
-        if (! $token) {
-            return response()->json(['message' => 'Unauthorized'], 401);
-        }
-
-        $screen = Screen::where('device_token', hash('sha256', $token))->first();
+        $screen = $this->findScreenByToken($this->deviceTokenFrom($request));
 
         if (! $screen) {
-            return response()->json(['message' => 'Unauthorized'], 401);
+            return $this->unauthorized();
         }
 
-        if ($screen->device_token_expires_at && $screen->device_token_expires_at->isPast()) {
-            return response()->json(['message' => 'Device token expired'], 401);
+        if ($this->deviceTokenIsExpired($screen)) {
+            return $this->unauthorized('Device token expired');
         }
 
         $screen->last_seen_at = now();
@@ -548,23 +570,84 @@ class ScreenController extends Controller
         ], 200);
     }
 
-    protected function authorizeScreen($user, Screen $screen): void
+    /**
+     * Credit the elapsed time since the previous heartbeat to today's
+     * per-video aggregate. Only counts while the TV reports playing, and
+     * each beat is capped so offline gaps never inflate the totals.
+     */
+    protected function accumulatePlayTime(Screen $screen, mixed $previousSeenAt, string $videoId, bool $playing): void
     {
-        if (! $screen->business) {
-            abort(404);
+        if (! $playing || ! $previousSeenAt instanceof \DateTimeInterface) {
+            return;
         }
 
-        if ($screen->business->user_id !== $user->id) {
-            abort(403);
+        $seconds = (int) min(abs(now()->diffInSeconds($previousSeenAt)), 120);
+
+        if ($seconds <= 0) {
+            return;
         }
+
+        PlaybackStat::query()->updateOrCreate(
+            [
+                'screen_id' => $screen->id,
+                'video_id' => $videoId,
+                'date' => now()->toDateString(),
+            ],
+            ['busniss_id' => $screen->busniss_id]
+        )->increment('seconds', $seconds);
     }
 
-    protected function ensureBusinessOwned($user, string $businessId): void
+    protected function deviceTokenFrom(Request $request): ?string
     {
-        $business = Business::findOrFail($businessId);
+        $token = $request->bearerToken() ?: $request->input('device_token');
 
-        if ($business->user_id !== $user->id) {
-            abort(403);
+        return is_string($token) && $token !== '' ? $token : null;
+    }
+
+    protected function findScreenByToken(?string $token): ?Screen
+    {
+        if (! $token) {
+            return null;
+        }
+
+        return Screen::where('device_token', hash('sha256', $token))->first();
+    }
+
+    protected function deviceTokenIsExpired(Screen $screen): bool
+    {
+        return $screen->device_token_expires_at && $screen->device_token_expires_at->isPast();
+    }
+
+    protected function unauthorized(string $message = 'Unauthorized'): JsonResponse
+    {
+        return response()->json(['message' => $message], 401);
+    }
+
+    /**
+     * Mint a fresh device token, storing only its hash. The raw token is
+     * shown once and never stored.
+     */
+    protected function issueDeviceToken(Screen $screen): string
+    {
+        $rawToken = Str::random(64);
+
+        $screen->device_token = hash('sha256', $rawToken);
+        $screen->device_token_expires_at = now()->addDays(self::DEVICE_TOKEN_TTL_DAYS);
+
+        return $rawToken;
+    }
+
+    protected function pairingCodeMatches(Screen $screen, ?string $code): bool
+    {
+        return $screen->pairing_code
+            && $code
+            && strtoupper($screen->pairing_code) === strtoupper($code);
+    }
+
+    protected function authorizeScreen($user, Screen $screen): void
+    {
+        if (! $screen->business || ! $screen->business->isAccessibleBy($user)) {
+            abort($screen->business ? 403 : 404);
         }
     }
 }

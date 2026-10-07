@@ -7,6 +7,7 @@ export interface Business {
     screens_count?: number;
     playlists_count?: number;
     videos_count?: number;
+    role?: 'owner' | 'member';
 }
 
 export interface Screen {
@@ -20,11 +21,16 @@ export interface Screen {
     current_position_ms: number | null;
     position_reported_at: string | null;
     is_playing: boolean | null;
+    playback_mode: 'loop' | 'once';
     pairing_code_expires_at: string | null;
     device_token_expires_at: string | null;
     created_at: string;
     updated_at: string;
     screen_playlists?: Playlist[];
+    business?: {
+        id: string;
+        name: string;
+    };
 }
 
 export interface Playlist {
@@ -46,6 +52,7 @@ export interface Video {
     busniss_id: string | null;
     name: string | null;
     url: string;
+    media_url: string;
     created_at: string;
     updated_at: string;
     pivot?: {

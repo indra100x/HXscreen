@@ -3,7 +3,8 @@
  *
  * Paths stored on the local `public` disk are relative (e.g.
  * `videos/clip.mp4`) and served through the storage symlink, while older
- * rows may hold absolute (e.g. S3) URLs.
+ * rows may hold absolute (e.g. S3) URLs. Signed `media_url` values pass
+ * through untouched — callers should prefer them.
  */
 export function publicFileUrl(path: string): string {
     if (
